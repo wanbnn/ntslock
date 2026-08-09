@@ -78,6 +78,36 @@ def test_container_project_is_rejected_when_direct_port_cannot_be_isolated(clien
     assert browser.get("/api/projects", headers=headers).json() == []
 
 
+def test_original_published_port_resolves_to_qr_gateway(client):
+    browser, headers = client
+
+    class RoutingFirewall:
+        def reconcile(self, projects):
+            return self.status()
+
+        def status(self):
+            return {
+                "enabled": True, "available": True, "secure": True,
+                "managed": True, "containers": ["website"],
+                "protected_ports": ["tcp/8088"], "redirected_ports": ["tcp/8088"],
+                "loopback_ports": [], "error": "",
+            }
+
+        def project_slug_for_port(self, port):
+            return "website" if port == 8088 else None
+
+    app.state.firewall = RoutingFirewall()
+    response = browser.post("/api/projects", headers=headers, json={
+        "name": "Website", "slug": "website", "upstream_url": "http://127.0.0.1:8088",
+        "docker_container_id": "abc", "qr_required": True,
+    })
+    assert response.status_code == 201
+
+    gate = browser.get("http://public.example:8088/")
+    assert gate.status_code == 200
+    assert 'data-slug="website"' in gate.text
+
+
 def test_qr_token_rotation_and_browser_bound_approval(client):
     browser, headers = client
     project = create_project(browser, headers)

@@ -18,12 +18,12 @@ def test_reconcile_builds_owned_drop_rules(monkeypatch):
 
     firewall = ContainerFirewall("unused", runner=runner)
     monkeypatch.setattr(firewall, "_published_ports", lambda ids: ([
-        PublishedPort("tcp", 8088, "0.0.0.0", "website"),
-        PublishedPort("tcp", 9090, "127.0.0.1", "private-api"),
+        PublishedPort("tcp", 8088, "0.0.0.0", "abc", "website"),
+        PublishedPort("tcp", 9090, "127.0.0.1", "def", "private-api"),
     ], ["website", "private-api"]))
     monkeypatch.setattr("inlock.container_firewall.shutil.which", lambda name: f"/usr/sbin/{name}" if name == "iptables" else None)
 
-    status = firewall.reconcile([{"docker_container_id": "abc"}])
+    status = firewall.reconcile([{"docker_container_id": "abc", "slug": "website"}])
 
     assert status["secure"] and status["available"]
     assert status["protected_ports"] == ["tcp/8088"]
@@ -32,6 +32,10 @@ def test_reconcile_builds_owned_drop_rules(monkeypatch):
     assert drop[-1] == "DROP"
     assert any("lo" in command and "RETURN" in command for command in commands)
     assert not any("9090" in command for command in commands)
+    redirect = next(command for command in commands if "--to-ports" in command)
+    assert redirect[redirect.index("--dport") + 1] == "8088"
+    assert redirect[redirect.index("--to-ports") + 1] == "14900"
+    assert firewall.project_slug_for_port(8088) == "website"
 
 
 def test_docker_failure_preserves_rules_and_reports_insecure(monkeypatch):
@@ -49,7 +53,7 @@ def test_docker_failure_preserves_rules_and_reports_insecure(monkeypatch):
 def test_loopback_binding_needs_no_drop_rule(monkeypatch):
     firewall = ContainerFirewall("unused", runner=lambda command: result())
     monkeypatch.setattr(firewall, "_published_ports", lambda ids: ([
-        PublishedPort("tcp", 8088, "127.0.0.1", "website"),
+        PublishedPort("tcp", 8088, "127.0.0.1", "abc", "website"),
     ], ["website"]))
     monkeypatch.setattr("inlock.container_firewall.shutil.which", lambda name: None)
     status = firewall.reconcile([{"docker_container_id": "abc"}])

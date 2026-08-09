@@ -86,6 +86,16 @@ def admin(request: Request) -> None:
     require_admin(request, settings(request).admin_token)
 
 
+def request_project(request: Request) -> dict | None:
+    host = request.url.hostname or ""
+    project = store(request).project_by_host(host)
+    if project:
+        return project
+    incoming_port = request.url.port or (443 if request.url.scheme == "https" else 80)
+    slug = request.app.state.firewall.project_slug_for_port(incoming_port)
+    return store(request).project_by_slug(slug) if slug else None
+
+
 async def reconcile_isolation(request: Request) -> dict:
     return await asyncio.to_thread(
         request.app.state.firewall.reconcile, store(request).projects()
@@ -145,7 +155,7 @@ async def health(request: Request):
 @app.get("/", response_class=HTMLResponse, include_in_schema=False)
 async def home(request: Request):
     host = request.url.hostname or ""
-    project = store(request).project_by_host(host)
+    project = request_project(request)
     if project and (not settings(request).admin_host or host != settings(request).admin_host):
         return await proxy_request(request, project, "")
     return HTMLResponse(dashboard_html(settings(request).tile_url))
@@ -405,8 +415,7 @@ async def proxy_request(request: Request, project: dict, path: str):
 
 @app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"], include_in_schema=False)
 async def proxy_by_host(path: str, request: Request):
-    host = request.url.hostname or ""
-    project = store(request).project_by_host(host)
+    project = request_project(request)
     if not project:
         raise HTTPException(404, "Rota não encontrada")
     return await proxy_request(request, project, path)

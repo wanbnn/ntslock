@@ -23,7 +23,8 @@ administrativo. Abra `http://IP-DO-SERVIDOR:14900` e informe esse token no paine
 ## O que já funciona
 
 - descoberta automática de containers, imagens, estados e portas pelo Docker;
-- isolamento automático das portas publicadas na cadeia `DOCKER-USER`;
+- tomada transparente das portas publicadas com `INLOCK_REDIRECT` e bloqueio
+  defensivo na cadeia `DOCKER-USER`;
 - projetos por host (`app.exemplo.com`) ou rota (`/p/<slug>`);
 - reverse proxy HTTP com preservação dos cabeçalhos de encaminhamento;
 - rate limit por IP ou global com janela deslizante;
@@ -56,11 +57,13 @@ exposta somente pela rede Docker e o Inlock é seu único ponto de entrada.
 
 Ao selecionar um container, o Inlock também gerencia sua exposição no host. As
 portas Docker publicadas continuam disponíveis localmente para o proxy, mas
-conexões externas diretas são descartadas por uma cadeia própria,
-`INLOCK_GUARD`, antes de chegarem ao container. Se o Docker ou o firewall não
-puderem ser gerenciados, o cadastro é recusado: o sistema não apresenta uma
-proteção falsa. O estado e as portas são reconciliados novamente a cada 10
-segundos para acompanhar reinícios e mudanças nos containers.
+conexões TCP externas são desviadas para o gateway pela cadeia
+`INLOCK_REDIRECT`. Assim, a URL e a porta originais passam a exibir o QR Code;
+depois da aprovação, o Inlock encaminha a requisição ao container. A cadeia
+`INLOCK_GUARD` bloqueia tráfego que não puder ser interceptado. Se o Docker ou o
+firewall não puderem ser gerenciados, o cadastro é recusado: o sistema não
+apresenta uma proteção falsa. O estado e as portas são reconciliados novamente
+a cada 10 segundos para acompanhar reinícios e mudanças nos containers.
 
 Nenhum QR Code pode provar presença física absoluta: uma transmissão ao vivo ou
 foto do código ainda pode ser lida remotamente dentro dos 60 segundos. Para
@@ -118,6 +121,7 @@ firewall. Confira o isolamento ativo com:
 
 ```bash
 sudo iptables -S INLOCK_GUARD
+sudo iptables -t nat -S INLOCK_REDIRECT
 ```
 
 ## Publicar uma aplicação
@@ -131,9 +135,10 @@ sudo iptables -S INLOCK_GUARD
    para o container protegido.
 
 No momento do cadastro, o Inlock inspeciona todas as portas do container e
-bloqueia os bindings públicos no firewall do host. O upstream não é modificado
-nem recebe código injetado; o controle ocorre no ponto correto da rede Docker,
-impedindo o bypass mesmo que alguém descubra a antiga porta publicada.
+assume os bindings TCP públicos no firewall do host. Abrir a URL original do
+container mostra o QR Code, e não a aplicação. O upstream não é modificado nem
+recebe código injetado; o controle ocorre no ponto correto da rede Docker,
+impedindo o bypass mesmo que alguém descubra a porta publicada.
 
 Exemplo Caddy:
 
@@ -173,6 +178,9 @@ INLOCK_TILE_URL=https://tiles.seudominio/{z}/{x}/{y}.png
   backend por Redis antes de escalar horizontalmente.
 - WebSocket e streaming de corpos grandes ainda não são encaminhados nesta
   primeira versão; HTTP convencional funciona normalmente.
+- A tomada transparente pressupõe HTTP. Para uma porta HTTPS, termine TLS em
+  Caddy/Nginx antes do Inlock, pois o gateway não possui o certificado privado
+  do container.
 - Mantenha upstreams não gerenciados inacessíveis pela rede pública. Em projetos
   vinculados a containers, o `INLOCK_GUARD` realiza esse bloqueio automaticamente.
 

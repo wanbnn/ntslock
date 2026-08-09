@@ -62,6 +62,7 @@ if ! id inlock >/dev/null 2>&1; then
 fi
 install -d -o inlock -g inlock -m 0750 "${DATA_ROOT}"
 install -d -o root -g inlock -m 0750 "${CONFIG_ROOT}"
+install -o inlock -g inlock -m 0600 /dev/null /run/xtables.lock
 
 if getent group docker >/dev/null 2>&1; then
   usermod -aG docker inlock
@@ -111,6 +112,7 @@ User=inlock
 Group=inlock
 ${docker_group_line}
 EnvironmentFile=${env_file}
+ExecStartPre=+/usr/bin/install -o inlock -g inlock -m 0600 /dev/null /run/xtables.lock
 ExecStart=${INSTALL_ROOT}/venv/bin/uvicorn inlock.main:app --host 0.0.0.0 --port 14900 --proxy-headers --forwarded-allow-ips 127.0.0.1
 Restart=on-failure
 RestartSec=3

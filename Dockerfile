@@ -10,7 +10,11 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/* \
     && python -m pip install --no-cache-dir .
 
-RUN useradd --system --uid 10001 --create-home inlock && mkdir -p /data && chown inlock:inlock /data
+RUN useradd --system --uid 10001 --create-home inlock \
+    && mkdir -p /data \
+    && touch /run/xtables.lock \
+    && chown inlock:inlock /data /run/xtables.lock \
+    && chmod 0600 /run/xtables.lock
 USER inlock
 ENV INLOCK_DATA_DIR=/data
 EXPOSE 14900
