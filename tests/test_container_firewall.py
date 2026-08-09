@@ -35,6 +35,8 @@ def test_reconcile_builds_owned_drop_rules(monkeypatch):
     redirect = next(command for command in commands if "--to-ports" in command)
     assert redirect[redirect.index("--dport") + 1] == "8088"
     assert redirect[redirect.index("--to-ports") + 1] == "14900"
+    assert any("INLOCK_OUTPUT" in command and "--uid-owner" in command for command in commands)
+    assert any("INLOCK_OUTPUT" in command and "--to-ports" in command for command in commands)
     assert firewall.project_slug_for_port(8088) == "website"
 
 

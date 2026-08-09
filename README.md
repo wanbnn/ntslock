@@ -122,7 +122,33 @@ firewall. Confira o isolamento ativo com:
 ```bash
 sudo iptables -S INLOCK_GUARD
 sudo iptables -t nat -S INLOCK_REDIRECT
+sudo iptables -t nat -S INLOCK_OUTPUT
 ```
+
+### Cloudflare Tunnel
+
+O Inlock também intercepta conexões de origem feitas pelo próprio host, como um
+serviço `cloudflared`, através de `INLOCK_OUTPUT`. O usuário do processo Inlock
+é excluído dessa regra para que o proxy consiga alcançar o upstream sem entrar
+em loop.
+
+A configuração recomendada é apontar o túnel diretamente para o gateway e
+cadastrar `journey.hephestos.com.br` como **Host público** do projeto:
+
+```yaml
+ingress:
+  - hostname: journey.hephestos.com.br
+    service: http://127.0.0.1:14900
+    originRequest:
+      httpHostHeader: journey.hephestos.com.br
+  - service: http_status:404
+```
+
+Usar a porta publicada original também é interceptado quando o `cloudflared`
+roda como serviço do host. Se ele roda em outro container e usa diretamente o
+nome ou IP privado do container protegido, esse caminho não atravessa o host;
+nesse caso a rota do túnel deve obrigatoriamente usar `127.0.0.1:14900` (com
+rede do host) ou outro endereço que alcance a porta `14900` do Inlock.
 
 ## Publicar uma aplicação
 
