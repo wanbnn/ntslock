@@ -36,6 +36,8 @@ administrativo. Abra `http://IP-DO-SERVIDOR:14900` e informe esse token no paine
 - token QR opaco, aleatório e de uso único, sem segredo no cliente;
 - aprovação vinculada ao navegador que exibiu o QR e sessão em cookie
   `HttpOnly` assinado.
+- modo totem, no qual o QR abre a aplicação somente no dispositivo móvel e a
+  tela original permanece exibindo códigos rotativos.
 
 ## Como o QR Code evita o acesso direto
 
@@ -69,6 +71,17 @@ Nenhum QR Code pode provar presença física absoluta: uma transmissão ao vivo 
 foto do código ainda pode ser lida remotamente dentro dos 60 segundos. Para
 ambientes de alto risco, combine esta confirmação de presença com login, WebAuthn
 ou aprovação em um dispositivo previamente registrado.
+
+### Modos do QR Code
+
+- **Modo padrão:** o celular confirma o desafio e o navegador que mostrou o QR
+  é liberado.
+- **Modo totem:** a leitura consome o token, cria a sessão no celular e abre
+  nele a mesma rota solicitada. O navegador do totem nunca recebe a sessão;
+  depois da leitura ele gera um novo QR para a próxima pessoa.
+
+O switch **Modo totem** fica nas configurações do projeto e, quando ativado,
+mantém automaticamente a exigência de QR Code ligada.
 
 ## Executar em desenvolvimento
 

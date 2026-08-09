@@ -73,16 +73,27 @@ def dashboard_html(tile_url: str) -> str:
 <script src="/static/dashboard.js" defer></script></body></html>"""
 
 
-def gate_html(project: dict) -> str:
+def gate_html(project: dict, return_path: str = "/") -> str:
+    totem = project.get("qr_totem_mode", False)
+    lead = (
+        "Leia o QR Code com seu celular. A aplicação será aberta diretamente no dispositivo móvel."
+        if totem else
+        "Leia o QR Code com seu celular e confirme o acesso. Esta tela será liberada automaticamente."
+    )
+    session_title = "Totem permanente" if totem else "Sessão vinculada"
+    session_copy = (
+        "Cada leitura abre uma sessão somente no dispositivo móvel."
+        if totem else "A aprovação libera somente este navegador."
+    )
     return f"""<!doctype html><html lang="pt-BR"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>Acesso protegido · {html.escape(project['name'])}</title>
 <link rel="stylesheet" href="/static/gate.css"></head><body>
-<main class="gate" data-slug="{html.escape(project['slug'])}">
+<main class="gate" data-slug="{html.escape(project['slug'])}" data-mode="{'totem' if totem else 'browser'}" data-return-path="{html.escape(return_path, quote=True)}">
  <section class="gate-copy"><a class="gate-brand" href="#"><span>◆</span> inlock</a>
   <p class="eyebrow">PRESENÇA VERIFICADA</p><h1>Acesso seguro,<br>em um scan.</h1>
-  <p class="lead">Leia o QR Code com seu celular e confirme o acesso. Esta tela será liberada automaticamente.</p>
+  <p class="lead">{lead}</p>
   <div class="trust"><span>✓</span><div><strong>Token efêmero</strong><small>Gerado no servidor e válido por apenas 60 segundos.</small></div></div>
-  <div class="trust"><span>✓</span><div><strong>Sessão vinculada</strong><small>A aprovação libera somente este navegador.</small></div></div>
+  <div class="trust"><span>✓</span><div><strong>{session_title}</strong><small>{session_copy}</small></div></div>
  </section>
  <section class="qr-card"><div class="qr-head"><span class="live-dot"></span><span>DESAFIO ATIVO</span><span id="countdown">60s</span></div>
   <div id="qr" class="qr-box"><div class="qr-loader"></div></div>

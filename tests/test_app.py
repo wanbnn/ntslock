@@ -136,6 +136,37 @@ def test_qr_token_rotation_and_browser_bound_approval(client):
     assert f"inlock_access_{project['id']}" in browser.cookies
 
 
+def test_totem_mode_opens_app_on_mobile_without_releasing_original_browser(client):
+    browser, headers = client
+    created = browser.post("/api/projects", headers=headers, json={
+        "name": "Totem", "slug": "totem", "upstream_url": "http://demo.internal:3000",
+        "qr_required": False, "qr_totem_mode": True,
+    })
+    assert created.status_code == 201
+    project = created.json()
+    assert project["qr_required"] and project["qr_totem_mode"]
+
+    gate = browser.get("/p/totem/mobile/welcome?campaign=qr")
+    assert 'data-mode="totem"' in gate.text
+    challenge = browser.post(
+        "/api/gate/totem/challenge",
+        params={"return_path": "/p/totem/mobile/welcome?campaign=qr"},
+    ).json()
+    assert challenge["mode"] == "totem"
+    token = challenge["qr_url"].split("/")[-1].removesuffix(".svg")
+
+    opened = browser.get("/gate/approve", params={"token": token}, follow_redirects=False)
+    assert opened.status_code == 303
+    assert opened.headers["location"] == "/p/totem/mobile/welcome?campaign=qr"
+    access_cookie = f"inlock_access_{project['id']}"
+    assert access_cookie in browser.cookies
+
+    browser.cookies.delete(access_cookie)
+    status = browser.get(f"/api/gate/challenges/{challenge['challenge_id']}")
+    assert status.json()["state"] == "mobile_opened"
+    assert access_cookie not in status.headers.get("set-cookie", "")
+
+
 def test_proxy_after_qr_approval(client):
     browser, headers = client
     create_project(browser, headers)

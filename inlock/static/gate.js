@@ -1,6 +1,8 @@
 const gate = document.querySelector('.gate');
 if (gate) {
   const slug = gate.dataset.slug;
+  const mode = gate.dataset.mode;
+  const returnPath = gate.dataset.returnPath || '/';
   let current = null, timer = null, poller = null, seconds = 60;
   const qr = document.querySelector('#qr'), status = document.querySelector('#gate-status');
   const countdown = document.querySelector('#countdown'), bar = document.querySelector('#timer-bar');
@@ -9,11 +11,11 @@ if (gate) {
     clearInterval(poller); clearInterval(timer);
     qr.innerHTML = '<div class="qr-loader"></div>'; status.textContent = 'Gerando desafio seguro…';
     try {
-      const response = await fetch(`/api/gate/${encodeURIComponent(slug)}/challenge`, {method:'POST'});
+      const response = await fetch(`/api/gate/${encodeURIComponent(slug)}/challenge?return_path=${encodeURIComponent(returnPath)}`, {method:'POST'});
       if (!response.ok) throw new Error();
       current = await response.json(); seconds = current.expires_in;
       qr.innerHTML = `<img src="${current.qr_url}" alt="QR Code de acesso, válido por 60 segundos">`;
-      status.textContent = 'Aguardando confirmação pelo celular…'; updateTimer();
+      status.textContent = mode === 'totem' ? 'Aguardando leitura pelo celular…' : 'Aguardando confirmação pelo celular…'; updateTimer();
       timer = setInterval(() => { seconds -= 1; updateTimer(); if (seconds <= 0) rotate(); }, 1000);
       poller = setInterval(check, 1200);
     } catch (_) { status.textContent = 'Não foi possível gerar o desafio. Tentando novamente…'; setTimeout(rotate, 3000); }
@@ -25,7 +27,7 @@ if (gate) {
     if (!response.ok) return;
     const result = await response.json();
     if (result.state === 'approved') { clearInterval(timer); clearInterval(poller); status.textContent = 'Acesso confirmado. Abrindo aplicação…'; qr.classList.add('approved'); setTimeout(() => location.reload(), 700); }
+    if (result.state === 'mobile_opened') { clearInterval(timer); clearInterval(poller); status.textContent = 'Aplicação aberta no celular. Gerando um novo código…'; qr.classList.add('approved'); setTimeout(() => { qr.classList.remove('approved'); rotate(); }, 1800); }
   }
   rotate();
 }
-

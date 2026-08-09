@@ -14,7 +14,7 @@ import qrcode
 import qrcode.image.svg
 import uvicorn
 from fastapi import Depends, FastAPI, Form, HTTPException, Request, Response
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from .config import Settings, get_settings
@@ -290,6 +290,9 @@ async def create_challenge(slug: str, request: Request):
     now = int(time.time())
     challenge_id = random_token(18)
     opaque_token = random_token(32)
+    return_path = request.query_params.get("return_path", "/")
+    if not return_path.startswith("/") or return_path.startswith("//"):
+        return_path = "/"
     store(request).prune_challenges(now - 300)
     store(request).save_challenge({
         "id": challenge_id,
@@ -297,12 +300,14 @@ async def create_challenge(slug: str, request: Request):
         "browser_hash": browser_hash(browser_secret, config.secret_key),
         "token_hash": token_hash(opaque_token),
         "expires_at": now + config.qr_ttl_seconds,
+        "return_path": return_path,
         "created_at": now,
     })
     response = JSONResponse({
         "challenge_id": challenge_id,
         "qr_url": f"/gate/qr/{quote(opaque_token)}.svg",
         "expires_in": config.qr_ttl_seconds,
+        "mode": "totem" if project["qr_totem_mode"] else "browser",
     })
     response.set_cookie(
         "inlock_browser", browser_secret, max_age=86400, httponly=True,
@@ -330,6 +335,21 @@ async def approve_gate(request: Request, token: str):
         return HTMLResponse(approval_html(token, "Acesso protegido", True), 410)
     project = store(request).project(challenge["project_id"])
     expired = challenge["state"] != "pending" or challenge["expires_at"] < int(time.time())
+    if project and project["qr_totem_mode"] and not expired:
+        now = int(time.time())
+        if not store(request).approve_challenge(challenge["id"], now, "mobile_opened"):
+            return HTMLResponse(approval_html(token, project["name"], True), 410)
+        config = settings(request)
+        response = RedirectResponse(challenge.get("return_path") or "/", status_code=303)
+        response.set_cookie(
+            f"inlock_access_{project['id']}",
+            sign_access(project["id"], config.secret_key, config.access_ttl_seconds),
+            max_age=config.access_ttl_seconds, httponly=True, secure=config.secure_cookies,
+            samesite="lax", path="/",
+        )
+        ip = client_ip(request, config.trusted_proxies)
+        store(request).audit(project["id"], "qr.mobile_opened", "success", ip)
+        return response
     return HTMLResponse(approval_html(token, project["name"] if project else "Acesso protegido", expired), 410 if expired else 200)
 
 
@@ -388,7 +408,12 @@ async def proxy_request(request: Request, project: dict, path: str):
     if project["qr_required"]:
         access = request.cookies.get(f"inlock_access_{project['id']}", "")
         if not verify_access(access, project["id"], config.secret_key):
-            return HTMLResponse(gate_html(project), headers={"Cache-Control": "no-store"})
+            return_path = request.url.path
+            if request.url.query:
+                return_path += f"?{request.url.query}"
+            return HTMLResponse(
+                gate_html(project, return_path), headers={"Cache-Control": "no-store"}
+            )
     query = f"?{request.url.query}" if request.url.query else ""
     url = f"{project['upstream_url']}/{path}{query}"
     headers = {key: value for key, value in request.headers.items() if key.lower() not in HOP_BY_HOP and key.lower() != "cookie"}

@@ -4,7 +4,7 @@ import re
 from typing import Any, Literal
 from urllib.parse import urlparse
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class ProjectCreate(BaseModel):
@@ -15,6 +15,13 @@ class ProjectCreate(BaseModel):
     docker_container_id: str = ""
     enabled: bool = True
     qr_required: bool = False
+    qr_totem_mode: bool = False
+
+    @model_validator(mode="after")
+    def totem_requires_qr(self):
+        if self.qr_totem_mode:
+            self.qr_required = True
+        return self
 
     @field_validator("slug")
     @classmethod
@@ -48,6 +55,7 @@ class ProjectUpdate(BaseModel):
     docker_container_id: str | None = None
     enabled: bool | None = None
     qr_required: bool | None = None
+    qr_totem_mode: bool | None = None
 
 
 PolicyType = Literal["rate_limit", "geo", "user_agent", "ip_allowlist", "ip_blocklist"]
@@ -59,4 +67,3 @@ class PolicyCreate(BaseModel):
     enabled: bool = True
     priority: int = Field(default=100, ge=1, le=10000)
     config: dict[str, Any] = Field(default_factory=dict)
-

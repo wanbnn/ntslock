@@ -21,6 +21,7 @@ CREATE TABLE IF NOT EXISTS projects (
     docker_container_id TEXT NOT NULL DEFAULT '',
     enabled INTEGER NOT NULL DEFAULT 1,
     qr_required INTEGER NOT NULL DEFAULT 0,
+    qr_totem_mode INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS policies (
@@ -41,6 +42,7 @@ CREATE TABLE IF NOT EXISTS challenges (
     state TEXT NOT NULL DEFAULT 'pending',
     expires_at INTEGER NOT NULL,
     approved_at INTEGER,
+    return_path TEXT NOT NULL DEFAULT '/',
     created_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_challenge_expiry ON challenges(expires_at);
@@ -82,6 +84,20 @@ class Store:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self._lock, self.connect() as connection:
             connection.executescript(SCHEMA)
+            project_columns = {
+                row["name"] for row in connection.execute("PRAGMA table_info(projects)")
+            }
+            if "qr_totem_mode" not in project_columns:
+                connection.execute(
+                    "ALTER TABLE projects ADD COLUMN qr_totem_mode INTEGER NOT NULL DEFAULT 0"
+                )
+            challenge_columns = {
+                row["name"] for row in connection.execute("PRAGMA table_info(challenges)")
+            }
+            if "return_path" not in challenge_columns:
+                connection.execute(
+                    "ALTER TABLE challenges ADD COLUMN return_path TEXT NOT NULL DEFAULT '/'"
+                )
 
     @staticmethod
     def _project(row: sqlite3.Row | None) -> dict[str, Any] | None:
@@ -90,6 +106,7 @@ class Store:
         item = dict(row)
         item["enabled"] = bool(item["enabled"])
         item["qr_required"] = bool(item["qr_required"])
+        item["qr_totem_mode"] = bool(item["qr_totem_mode"])
         return item
 
     @staticmethod
@@ -123,23 +140,27 @@ class Store:
         with self._lock, self.connect() as db:
             cursor = db.execute(
                 """INSERT INTO projects
-                (name,slug,upstream_url,public_host,docker_container_id,enabled,qr_required,created_at)
-                VALUES (?,?,?,?,?,?,?,?)""",
+                (name,slug,upstream_url,public_host,docker_container_id,enabled,qr_required,qr_totem_mode,created_at)
+                VALUES (?,?,?,?,?,?,?,?,?)""",
                 (
                     values["name"], values["slug"], values["upstream_url"],
                     values.get("public_host", ""), values.get("docker_container_id", ""),
-                    int(values.get("enabled", True)), int(values.get("qr_required", False)), utcnow(),
+                    int(values.get("enabled", True)), int(values.get("qr_required", False)),
+                    int(values.get("qr_totem_mode", False)), utcnow(),
                 ),
             )
             project_id = cursor.lastrowid
         return self.project(project_id)
 
     def update_project(self, project_id: int, values: dict[str, Any]) -> dict[str, Any] | None:
-        allowed = {"name", "slug", "upstream_url", "public_host", "docker_container_id", "enabled", "qr_required"}
+        allowed = {
+            "name", "slug", "upstream_url", "public_host", "docker_container_id",
+            "enabled", "qr_required", "qr_totem_mode",
+        }
         fields = {key: value for key, value in values.items() if key in allowed}
         if not fields:
             return self.project(project_id)
-        for key in ("enabled", "qr_required"):
+        for key in ("enabled", "qr_required", "qr_totem_mode"):
             if key in fields:
                 fields[key] = int(fields[key])
         clause = ", ".join(f"{key}=?" for key in fields)
@@ -181,10 +202,11 @@ class Store:
             )
             db.execute(
                 """INSERT INTO challenges
-                (id,project_id,browser_hash,token_hash,state,expires_at,created_at)
-                VALUES (?,?,?,?,?,?,?)""",
+                (id,project_id,browser_hash,token_hash,state,expires_at,return_path,created_at)
+                VALUES (?,?,?,?,?,?,?,?)""",
                 (values["id"], values["project_id"], values["browser_hash"], values["token_hash"],
-                 "pending", values["expires_at"], values["created_at"]),
+                 "pending", values["expires_at"], values.get("return_path", "/"),
+                 values["created_at"]),
             )
 
     def challenge(self, challenge_id: str) -> dict[str, Any] | None:
@@ -197,11 +219,13 @@ class Store:
             row = db.execute("SELECT * FROM challenges WHERE token_hash=?", (token_hash,)).fetchone()
             return dict(row) if row else None
 
-    def approve_challenge(self, challenge_id: str, now: int) -> bool:
+    def approve_challenge(self, challenge_id: str, now: int, state: str = "approved") -> bool:
+        if state not in {"approved", "mobile_opened"}:
+            raise ValueError("estado de aprovação inválido")
         with self._lock, self.connect() as db:
             cursor = db.execute(
-                "UPDATE challenges SET state='approved', approved_at=? WHERE id=? AND state='pending' AND expires_at>=?",
-                (now, challenge_id, now),
+                "UPDATE challenges SET state=?, approved_at=? WHERE id=? AND state='pending' AND expires_at>=?",
+                (state, now, challenge_id, now),
             )
             return cursor.rowcount > 0
 
@@ -228,4 +252,3 @@ class Store:
                 item["detail"] = json.loads(item["detail"])
                 result.append(item)
             return result
-
