@@ -1,3 +1,4 @@
+import json
 import re
 from pathlib import Path
 
@@ -237,6 +238,57 @@ def test_bot_score_visual_challenge_releases_only_the_verified_browser(client):
         )
         assert released.status_code == 200
         assert released.text == "human:/private/dashboard"
+    finally:
+        browser.portal.call(app.state.http.aclose)
+        app.state.http = old
+
+
+def test_bot_score_progressive_javascript_probe_allows_browser_like_session(client):
+    browser, headers = client
+    project = create_project(browser, headers, qr=False)
+    policy = browser.post(
+        f"/api/projects/{project['id']}/policies", headers=headers,
+        json={"type": "bot_score", "name": "Anti-bot", "config": {"threshold": 65}},
+    )
+    assert policy.status_code == 201
+    browser_headers = {
+        "user-agent": "Mozilla/5.0 Chrome/126.0 Safari/537.36",
+        "accept": "text/html,application/xhtml+xml",
+        "accept-language": "pt-BR,pt;q=0.9",
+        "accept-encoding": "gzip, deflate, br",
+        "sec-fetch-site": "none",
+        "sec-ch-ua": '"Chromium";v="126"',
+        "sec-ch-ua-mobile": "?0",
+        "sec-ch-ua-platform": '"Linux"',
+    }
+
+    probe_page = browser.get("/p/demo/welcome", headers=browser_headers)
+    assert probe_page.status_code == 200
+    assert "DESAFIO PROGRESSIVO" in probe_page.text
+    probe_id = re.search(r'data-probe="([^"]+)"', probe_page.text).group(1)
+    telemetry = {
+        "js": True, "webdriver": False, "automation": False, "elapsed": 1800,
+        "trustedClick": True, "pointerMoves": 3, "pointerEvents": 1,
+        "cookieEnabled": True, "storage": True, "languages": 2, "plugins": 3,
+        "screenWidth": 1920, "screenHeight": 1080, "visibility": "visible",
+    }
+    verified = browser.post(
+        "/gate/probe/verify", headers=browser_headers, follow_redirects=False,
+        data={"probe_id": probe_id, "telemetry": json.dumps(telemetry)},
+    )
+    assert verified.status_code == 303
+    assert verified.headers["location"] == "/p/demo/welcome"
+    assert f"inlock_bot_proof_{project['id']}" in browser.cookies
+
+    async def upstream(request: httpx.Request):
+        return httpx.Response(200, text="browser verified")
+
+    old = app.state.http
+    app.state.http = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+    try:
+        released = browser.get("/p/demo/welcome", headers=browser_headers)
+        assert released.status_code == 200
+        assert released.text == "browser verified"
     finally:
         browser.portal.call(app.state.http.aclose)
         app.state.http = old

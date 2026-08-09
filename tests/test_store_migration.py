@@ -22,10 +22,20 @@ def test_existing_database_gains_totem_columns(tmp_path):
             );
         """)
 
-    Store(database)
+    store = Store(database)
 
     with sqlite3.connect(database) as connection:
         project_columns = {row[1] for row in connection.execute("PRAGMA table_info(projects)")}
         challenge_columns = {row[1] for row in connection.execute("PRAGMA table_info(challenges)")}
+        probe_table = connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='browser_probes'"
+        ).fetchone()
     assert "qr_totem_mode" in project_columns
     assert "return_path" in challenge_columns
+    assert probe_table
+
+    store.audit(None, "bot.challenge", "failed", "203.0.113.8")
+    store.audit(None, "bot.challenge", "failed", "203.0.113.8")
+    score, counts = store.ip_reputation_score("203.0.113.8", "2000-01-01T00:00:00+00:00")
+    assert score == 30
+    assert counts["bot.challenge:failed"] == 2

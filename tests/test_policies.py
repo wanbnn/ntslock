@@ -78,3 +78,27 @@ def test_bot_score_distinguishes_browser_headers_from_command_line_client():
 
     assert calculate_bot_score(browser_headers, browser_agent) == 0
     assert calculate_bot_score({"accept": "*/*"}, "curl/8.12.0") >= 75
+
+
+@pytest.mark.asyncio
+async def test_bot_score_detects_impossibly_fast_page_navigation_burst():
+    engine = PolicyEngine()
+    policies = [policy("bot_score", {"threshold": 65})]
+    headers = {
+        "accept": "text/html", "accept-language": "pt-BR",
+        "accept-encoding": "br", "sec-fetch-site": "same-origin",
+    }
+    agent = "Mozilla/5.0 Chrome/126.0 Safari/537.36"
+    decision = None
+    for index in range(6):
+        decision = await engine.evaluate(
+            PROJECT, policies, "10.0.0.1", agent, headers=headers,
+            bot_context={
+                "js_verified": True, "is_navigation": True,
+                "request_path": f"/page/{index}",
+            },
+        )
+
+    assert decision and not decision.allowed
+    assert decision.reason == "bot_suspected"
+    assert decision.bot_score >= 65

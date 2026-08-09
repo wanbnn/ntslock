@@ -70,6 +70,32 @@ class RateLimiter:
             return True, 0
 
 
+class NavigationTracker:
+    """Scores unusually fast top-level navigation without counting page assets."""
+
+    def __init__(self):
+        self._visits: dict[str, deque[tuple[float, str]]] = defaultdict(deque)
+        self._lock = asyncio.Lock()
+
+    async def score(self, key: str, path: str) -> int:
+        now = time.monotonic()
+        async with self._lock:
+            visits = self._visits[key]
+            while visits and visits[0][0] <= now - 60:
+                visits.popleft()
+            recent_ten = sum(1 for visited_at, _ in visits if visited_at > now - 10)
+            unique_paths = len({visited_path for _, visited_path in visits} | {path})
+            score = 0
+            if visits and now - visits[-1][0] < 0.35:
+                score += 25
+            if recent_ten >= 5:
+                score += 40
+            if unique_paths >= 12:
+                score += 25
+            visits.append((now, path))
+            return min(75, score)
+
+
 class GeoLocator:
     def __init__(self, database: Path | None):
         self.database = database
@@ -115,14 +141,17 @@ def _distance_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
 class PolicyEngine:
     def __init__(self, geo_database: Path | None = None):
         self.rates = RateLimiter()
+        self.navigation = NavigationTracker()
         self.geo = GeoLocator(geo_database)
 
     async def evaluate(
         self, project: dict[str, Any], policies: list[dict[str, Any]], ip: str,
         user_agent: str, headers: Mapping[str, str] | None = None,
-        human_verified: bool = False,
+        human_verified: bool = False, bot_context: Mapping[str, Any] | None = None,
     ) -> Decision:
         location: dict[str, Any] | None = None
+        progressive_decision: Decision | None = None
+        navigation_score: int | None = None
         for policy in policies:
             if not policy["enabled"]:
                 continue
@@ -152,11 +181,32 @@ class PolicyEngine:
             elif policy_type == "bot_score":
                 if human_verified:
                     continue
+                context = bot_context or {}
                 score = calculate_bot_score(headers, user_agent)
+                score += min(100, max(0, int(context.get("behavior_score", 0))))
+                score += min(45, max(0, int(context.get("ip_reputation", 0))))
+                if context.get("is_navigation"):
+                    if navigation_score is None:
+                        navigation_score = await self.navigation.score(
+                            f"{project['id']}:{ip}", str(context.get("request_path", "/"))
+                        )
+                    score += navigation_score
+                if context.get("cookie_tampered"):
+                    score += 35
+                if context.get("request_fingerprint_changed"):
+                    score += 15
+                if context.get("tls_fingerprint_changed"):
+                    score += 20
+                score = min(100, score)
                 threshold = min(100, max(0, int(config.get("threshold", 65))))
                 if score >= threshold:
-                    return Decision(
-                        False, "bot_suspected", policy["id"], bot_score=score
+                    if not progressive_decision or progressive_decision.reason != "bot_suspected":
+                        progressive_decision = Decision(
+                            False, "bot_suspected", policy["id"], bot_score=score
+                        )
+                elif not context.get("js_verified") and not progressive_decision:
+                    progressive_decision = Decision(
+                        False, "browser_probe_required", policy["id"], bot_score=score
                     )
             elif policy_type == "geo":
                 if location is None:
@@ -182,4 +232,4 @@ class PolicyEngine:
                     )
                     if distance > float(radius["kilometers"]):
                         return Decision(False, "outside_radius", policy["id"])
-        return Decision(True)
+        return progressive_decision or Decision(True)

@@ -86,13 +86,45 @@ mantém automaticamente a exigência de QR Code ligada.
 
 ## Bot score e verificação humana
 
-A política **Bot score** calcula uma probabilidade local de automação usando
-sinais da requisição, como user-agent de ferramentas, ausência dos cabeçalhos
-comuns de navegação e indicadores de webdriver. O valor vai de 0 (aparência
-humana) a 100 (forte suspeita). Quando ele atinge o threshold configurado, o
-Inlock substitui a aplicação por uma tela de navegação suspeita.
+A política **Bot score** calcula uma probabilidade local de automação de 0
+(aparência humana) a 100 (forte suspeita). Uma primeira análise considera
+user-agent, cabeçalhos de navegação, continuidade e integridade dos cookies,
+reputação local do IP e mudanças de fingerprint. Um navegador novo que não
+atingiu o threshold recebe um desafio progressivo curto antes da aplicação.
 
-O visitante seleciona formas e cores em uma grade gerada localmente. O desafio
+Esse primeiro estágio executa JavaScript e exige uma confirmação humana depois
+de um pequeno intervalo. Ele mede webdriver e globals de automação, tempo até o
+clique, evento confiável, movimentos de ponteiro, cookies, storage, idiomas,
+plugins, características da tela e visibilidade da página. A prova resultante é
+assinada, expira em 30 minutos e fica vinculada ao navegador, ao projeto e ao
+fingerprint da requisição. JavaScript ausente, interação instantânea, prova
+adulterada ou mudança incompatível elevam o score.
+
+Depois da prova, o gateway continua observando somente navegações de documento
+de nível superior: intervalos impossivelmente curtos, rajadas de páginas e
+enumeração rápida de muitos caminhos aumentam o score. Assets paralelos de uma
+página (`script`, CSS e imagens) não entram nessa contagem.
+
+A reputação do IP é construída sem serviços externos a partir dos últimos 15
+minutos de desafios, falhas e bloqueios observados pelo próprio Inlock. Isso
+evita enviar endereços de visitantes a terceiros, mas não equivale a uma base
+global de abuso e deve ser calibrado com atenção em redes NAT compartilhadas.
+
+Quando o TLS termina diretamente no Inlock, o servidor usa versão e cipher
+disponíveis na conexão. Atrás do Cloudflare, o TLS do visitante termina na borda
+e esses dados não chegam ao origin. Um proxy confiável pode sobrescrever um
+header com JA3/JA4 e o Inlock o consumirá ao configurar, por exemplo:
+
+```env
+INLOCK_TLS_FINGERPRINT_HEADER=X-Inlock-JA4
+```
+
+Não habilite um header que o proxy apenas repassa: ele precisa remover qualquer
+valor enviado pelo cliente e gravar o fingerprint verdadeiro. O header só é
+aceito quando a conexão vem de uma rede em `INLOCK_TRUSTED_PROXIES`.
+
+Se o score final atingir o threshold, o visitante seleciona formas e cores em
+uma grade gerada localmente. O desafio
 expira, permite no máximo três tentativas, é vinculado ao navegador e sua resposta
 é validada no servidor. Ao acertar, recebe uma sessão `HttpOnly` assinada de 30
 minutos e volta à URL original; as demais políticas e o QR Code continuam sendo

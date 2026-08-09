@@ -7,6 +7,7 @@ import ipaddress
 import sqlite3
 import time
 from contextlib import asynccontextmanager, suppress
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from urllib.parse import quote
 
@@ -18,6 +19,12 @@ from fastapi import Depends, FastAPI, Form, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
+from .bot_defense import (
+    behavior_score,
+    parse_telemetry,
+    request_fingerprint,
+    tls_fingerprint,
+)
 from .captcha import create_visual_challenge, render_visual_challenge
 from .config import Settings, get_settings
 from .container_firewall import ContainerFirewall
@@ -30,11 +37,20 @@ from .security import (
     random_token,
     require_admin,
     sign_access,
+    sign_bot_proof,
     token_hash,
     verify_access,
+    verify_bot_proof,
 )
 from .store import Store
-from .ui import approval_html, approved_html, captcha_html, dashboard_html, gate_html
+from .ui import (
+    approval_html,
+    approved_html,
+    browser_probe_html,
+    captcha_html,
+    dashboard_html,
+    gate_html,
+)
 
 HOP_BY_HOP = {
     "connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te",
@@ -148,6 +164,37 @@ def human_challenge_response(
     response.set_cookie(
         "inlock_human_browser", browser_secret, max_age=config.captcha_ttl_seconds,
         httponly=True, secure=config.secure_cookies, samesite="lax", path="/",
+    )
+    return response
+
+
+def browser_probe_response(
+    request: Request, project: dict, return_path: str, preliminary_score: int
+) -> HTMLResponse:
+    config = settings(request)
+    browser_secret = request.cookies.get("inlock_probe_browser") or random_token()
+    probe_id = random_token(18)
+    created_at = time.time()
+    now = int(created_at)
+    store(request).save_browser_probe({
+        "id": probe_id,
+        "project_id": project["id"],
+        "browser_hash": browser_hash(browser_secret, config.secret_key),
+        "return_path": return_path,
+        "expires_at": now + config.browser_probe_ttl_seconds,
+        "created_at": created_at,
+    })
+    store(request).audit(
+        project["id"], "bot.probe", "required",
+        client_ip(request, config.trusted_proxies), preliminary_score=preliminary_score,
+    )
+    response = HTMLResponse(
+        browser_probe_html(project, probe_id), headers={"Cache-Control": "no-store"}
+    )
+    response.set_cookie(
+        "inlock_probe_browser", browser_secret,
+        max_age=config.browser_proof_ttl_seconds, httponly=True,
+        secure=config.secure_cookies, samesite="lax", path="/",
     )
     return response
 
@@ -335,6 +382,58 @@ async def containers(request: Request):
 @app.get("/api/events", dependencies=[Depends(admin)])
 async def events(request: Request, limit: int = 50):
     return store(request).events(min(max(limit, 1), 250))
+
+
+@app.post("/gate/probe/verify", include_in_schema=False)
+async def verify_browser_probe(
+    request: Request, probe_id: str = Form(...), telemetry: str = Form("{}")
+):
+    probe = store(request).browser_probe(probe_id)
+    config = settings(request)
+    browser_secret = request.cookies.get("inlock_probe_browser", "")
+    now = int(time.time())
+    if (
+        not probe or not browser_secret
+        or not hmac.compare_digest(
+            probe["browser_hash"], browser_hash(browser_secret, config.secret_key)
+        )
+    ):
+        raise HTTPException(404, "Verificação de navegador não encontrada")
+    project = store(request).project(probe["project_id"])
+    if (
+        not project or probe["state"] != "pending" or probe["expires_at"] < now
+        or not store(request).consume_browser_probe(probe_id, now)
+    ):
+        raise HTTPException(410, "Verificação de navegador expirada")
+
+    signals = parse_telemetry(telemetry)
+    try:
+        client_elapsed = float(signals.get("elapsed", 0))
+    except (TypeError, ValueError):
+        client_elapsed = 0
+    server_elapsed = max(0, (time.time() - float(probe["created_at"])) * 1000)
+    signals["elapsed"] = min(client_elapsed, server_elapsed)
+    score, reasons = behavior_score(signals)
+    fingerprint = request_fingerprint(request.headers)
+    tls = tls_fingerprint(
+        request, config.trusted_proxies, config.tls_fingerprint_header
+    )
+    proof = sign_bot_proof(
+        project["id"], config.secret_key, config.browser_proof_ttl_seconds,
+        probe["browser_hash"], score, fingerprint, tls,
+    )
+    store(request).audit(
+        project["id"], "bot.probe", "completed",
+        client_ip(request, config.trusted_proxies), behavior_score=score,
+        reasons=reasons, js=signals.get("js") is True,
+    )
+    response = RedirectResponse(probe["return_path"] or "/", status_code=303)
+    response.set_cookie(
+        f"inlock_bot_proof_{project['id']}", proof,
+        max_age=config.browser_proof_ttl_seconds, httponly=True,
+        secure=config.secure_cookies, samesite="lax", path="/",
+    )
+    return response
 
 
 @app.get("/gate/captcha/{challenge_id}.png", include_in_schema=False)
@@ -526,15 +625,57 @@ async def proxy_by_slug(slug: str, request: Request, path: str = ""):
 async def proxy_request(request: Request, project: dict, path: str):
     config = settings(request)
     ip = client_ip(request, config.trusted_proxies)
+    policies = store(request).policies(project["id"])
     human_access = request.cookies.get(f"inlock_human_{project['id']}", "")
     human_verified = verify_access(human_access, project["id"], config.secret_key)
+    probe_browser = request.cookies.get("inlock_probe_browser", "")
+    probe_digest = browser_hash(probe_browser, config.secret_key)
+    proof_value = request.cookies.get(f"inlock_bot_proof_{project['id']}", "")
+    proof = verify_bot_proof(
+        proof_value, project["id"], config.secret_key, probe_digest
+    ) if proof_value and probe_browser else None
+    current_fingerprint = request_fingerprint(request.headers)
+    current_tls = tls_fingerprint(
+        request, config.trusted_proxies, config.tls_fingerprint_header
+    )
+    reputation, reputation_events = 0, {}
+    if any(policy["enabled"] and policy["type"] == "bot_score" for policy in policies):
+        since = (datetime.now(UTC) - timedelta(minutes=15)).isoformat()
+        reputation, reputation_events = store(request).ip_reputation_score(ip, since)
+    bot_context = {
+        "js_verified": bool(proof),
+        "behavior_score": proof.get("behavior", 0) if proof else 0,
+        "ip_reputation": reputation,
+        "cookie_tampered": bool(proof_value and not proof),
+        "request_fingerprint_changed": bool(
+            proof and proof.get("request_fp") != current_fingerprint
+        ),
+        "tls_fingerprint_changed": bool(
+            proof and proof.get("tls_fp") and current_tls
+            and proof.get("tls_fp") != current_tls
+        ),
+        "is_navigation": (
+            request.headers.get("sec-fetch-dest") == "document"
+            or request.headers.get("sec-fetch-mode") == "navigate"
+        ),
+        "request_path": request.url.path,
+    }
     decision: Decision = await request.app.state.engine.evaluate(
-        project, store(request).policies(project["id"]), ip,
+        project, policies, ip,
         request.headers.get("user-agent", ""), headers=request.headers,
-        human_verified=human_verified,
+        human_verified=human_verified, bot_context=bot_context,
     )
     if not decision.allowed:
+        if decision.reason == "browser_probe_required":
+            return browser_probe_response(
+                request, project, request_return_path(request), decision.bot_score or 0
+            )
         if decision.reason == "bot_suspected":
+            store(request).audit(
+                project["id"], "bot.score", "suspected", ip,
+                score=decision.bot_score, context=bot_context,
+                reputation_events=reputation_events,
+            )
             return human_challenge_response(
                 request, project, request_return_path(request), decision.bot_score or 0
             )

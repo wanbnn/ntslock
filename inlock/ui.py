@@ -113,6 +113,26 @@ def approved_html() -> str:
     return """<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Acesso confirmado</title><link rel="stylesheet" href="/static/gate.css"></head><body><main class="mobile-confirm success"><div class="mobile-mark">✓</div><p class="eyebrow">ACESSO CONFIRMADO</p><h1>Tudo certo.</h1><p>O navegador original será liberado. Você já pode fechar esta página.</p></main></body></html>"""
 
 
+def browser_probe_html(project: dict, probe_id: str) -> str:
+    no_script = html.escape(json.dumps({"js": False}, separators=(",", ":")), quote=True)
+    return f"""<!doctype html><html lang="pt-BR"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>Verificando navegador · {html.escape(project['name'])}</title>
+<link rel="stylesheet" href="/static/gate.css"><link rel="stylesheet" href="/static/probe.css"></head><body>
+<main class="probe-shell" data-probe="{html.escape(probe_id)}">
+ <section class="probe-card"><a class="gate-brand" href="#"><span>◆</span> inlock</a>
+  <div class="probe-mark"><i></i><b>◇</b></div><p class="eyebrow">DESAFIO PROGRESSIVO</p>
+  <h1>Verificando seu navegador</h1><p>Estamos analisando a execução de JavaScript, continuidade da sessão e sinais naturais de interação.</p>
+  <div class="probe-progress"><i id="probe-bar"></i></div><small id="probe-status">Observe a página por um instante…</small>
+  <form method="post" action="/gate/probe/verify" id="probe-form">
+   <input type="hidden" name="probe_id" value="{html.escape(probe_id)}">
+   <input type="hidden" name="telemetry" id="probe-telemetry" value="{no_script}">
+   <button type="submit" id="probe-submit" disabled>Continuar para {html.escape(project['name'])}</button>
+   <noscript><style>#probe-submit{{display:block!important}}</style><p>JavaScript está desativado. Você continuará para uma verificação visual.</p><button type="submit">Continuar sem JavaScript</button></noscript>
+  </form><p class="probe-privacy">Os sinais são processados localmente pelo Inlock e não são enviados a provedores externos.</p>
+ </section>
+</main><script src="/static/probe.js" defer></script></body></html>"""
+
+
 def captcha_html(
     project: dict, challenge_id: str, target_label: str, error: str = ""
 ) -> str:

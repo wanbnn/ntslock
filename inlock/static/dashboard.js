@@ -112,7 +112,7 @@ async function patchProject(id, values) { try { await api(`/api/projects/${id}`,
 function policySummary(policy) {
   const c = policy.config;
   if (policy.type === 'rate_limit') return `${c.limit || 60} requisições / ${c.window_seconds || 60}s · ${c.scope === 'global' ? 'global' : 'por IP'}`;
-  if (policy.type === 'bot_score') return `Desafio humano quando o score atingir ${c.threshold ?? 65}`;
+  if (policy.type === 'bot_score') return `Análise progressiva · CAPTCHA quando o score atingir ${c.threshold ?? 65}`;
   if (policy.type === 'geo') return [...(c.countries || []), ...(c.states || []), ...(c.cities || []), c.radius ? `${c.radius.kilometers} km` : ''].filter(Boolean).join(', ') || 'Localização configurada';
   if (policy.type === 'user_agent') return (c.patterns || []).join(', ');
   return (c.networks || []).join(', ');
@@ -120,7 +120,7 @@ function policySummary(policy) {
 
 function policyFields(type) {
   if (type === 'rate_limit') return `<label>Requisições<input name="limit" type="number" min="1" value="60"></label><label>Janela (segundos)<input name="window" type="number" min="1" value="60"></label><label class="full">Escopo<select name="scope"><option value="ip">Por endereço IP</option><option value="global">Global para o projeto</option></select></label>`;
-  if (type === 'bot_score') return `<label class="full">Confiança mínima (0–100)<input name="threshold" type="number" min="0" max="100" value="65" required><small>0 indica navegação humana e 100 forte suspeita de automação. Ao atingir este valor, o visitante precisará resolver um desafio visual.</small></label>`;
+  if (type === 'bot_score') return `<label class="full">Confiança mínima (0–100)<input name="threshold" type="number" min="0" max="100" value="65" required><small>Combina requisição, JavaScript, interação, cookies, reputação local do IP e fingerprints. Navegadores novos passam por uma verificação curta; ao atingir este valor, o visitante resolve o CAPTCHA visual.</small></label>`;
   if (type === 'user_agent') return `<label class="full">Padrões bloqueados <span>(um por linha, aceita *)</span><textarea name="patterns" rows="5" placeholder="*bot*&#10;curl/*&#10;*crawler*"></textarea></label>`;
   if (type === 'ip_allowlist' || type === 'ip_blocklist') return `<label class="full">IPs ou redes CIDR <span>(um por linha)</span><textarea name="networks" rows="5" placeholder="203.0.113.10&#10;10.20.0.0/16"></textarea></label>`;
   return `<label class="full">Países permitidos <span>(ISO, separados por vírgula)</span><input name="countries" placeholder="BR, AR, UY"></label><label>Estados permitidos<input name="states" placeholder="SP, RJ"></label><label>Cidades permitidas<input name="cities" placeholder="São Paulo"></label><label class="full">Quando a localização for desconhecida<select name="on_unknown"><option value="deny">Negar acesso</option><option value="allow">Permitir acesso</option></select></label><div class="full"><span class="map-label">Raio permitido <small>(clique no mapa; opcional)</small></span><div id="geo-map"></div><div class="radius-row"><input name="latitude" placeholder="Latitude" readonly><input name="longitude" placeholder="Longitude" readonly><input name="kilometers" type="number" min="0.1" step="0.1" value="25" aria-label="Raio em quilômetros"><span>km</span></div></div>`;

@@ -59,6 +59,16 @@ CREATE TABLE IF NOT EXISTS captcha_challenges (
     created_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_captcha_expiry ON captcha_challenges(expires_at);
+CREATE TABLE IF NOT EXISTS browser_probes (
+    id TEXT PRIMARY KEY,
+    project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    browser_hash TEXT NOT NULL,
+    return_path TEXT NOT NULL DEFAULT '/',
+    state TEXT NOT NULL DEFAULT 'pending',
+    expires_at INTEGER NOT NULL,
+    created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_probe_expiry ON browser_probes(expires_at);
 CREATE TABLE IF NOT EXISTS audit_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     project_id INTEGER REFERENCES projects(id) ON DELETE SET NULL,
@@ -292,6 +302,57 @@ class Store:
                 "SELECT attempts FROM captcha_challenges WHERE id=?", (challenge_id,)
             ).fetchone()
             return int(row["attempts"]) if row else 3
+
+    def save_browser_probe(self, values: dict[str, Any]) -> None:
+        with self._lock, self.connect() as db:
+            db.execute(
+                """UPDATE browser_probes SET state='superseded'
+                WHERE project_id=? AND browser_hash=? AND state='pending'""",
+                (values["project_id"], values["browser_hash"]),
+            )
+            db.execute(
+                """INSERT INTO browser_probes
+                (id,project_id,browser_hash,return_path,state,expires_at,created_at)
+                VALUES (?,?,?,?,?,?,?)""",
+                (
+                    values["id"], values["project_id"], values["browser_hash"],
+                    values.get("return_path", "/"), "pending", values["expires_at"],
+                    values["created_at"],
+                ),
+            )
+            db.execute("DELETE FROM browser_probes WHERE expires_at<?", (values["created_at"] - 300,))
+
+    def browser_probe(self, probe_id: str) -> dict[str, Any] | None:
+        with self.connect() as db:
+            row = db.execute(
+                "SELECT * FROM browser_probes WHERE id=?", (probe_id,)
+            ).fetchone()
+            return dict(row) if row else None
+
+    def consume_browser_probe(self, probe_id: str, now: int) -> bool:
+        with self._lock, self.connect() as db:
+            return db.execute(
+                """UPDATE browser_probes SET state='completed'
+                WHERE id=? AND state='pending' AND expires_at>=?""",
+                (probe_id, now),
+            ).rowcount > 0
+
+    def ip_reputation_score(self, client_ip: str, since: str) -> tuple[int, dict[str, int]]:
+        with self.connect() as db:
+            rows = db.execute(
+                """SELECT action,outcome,COUNT(*) AS total FROM audit_events
+                WHERE client_ip=? AND created_at>=? GROUP BY action,outcome""",
+                (client_ip, since),
+            ).fetchall()
+        counts = {f"{row['action']}:{row['outcome']}": int(row["total"]) for row in rows}
+        failed = counts.get("bot.challenge:failed", 0)
+        challenged = counts.get("bot.challenge:challenged", 0)
+        denied = sum(
+            total for key, total in counts.items()
+            if key.endswith(":denied")
+        )
+        score = min(45, failed * 15 + max(0, challenged - 2) * 5 + min(15, denied * 3))
+        return score, counts
 
     def audit(self, project_id: int | None, action: str, outcome: str, client_ip: str = "", **detail) -> None:
         with self._lock, self.connect() as db:
