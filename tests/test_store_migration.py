@@ -29,4 +29,3 @@ def test_existing_database_gains_totem_columns(tmp_path):
         challenge_columns = {row[1] for row in connection.execute("PRAGMA table_info(challenges)")}
     assert "qr_totem_mode" in project_columns
     assert "return_path" in challenge_columns
-
