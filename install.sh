@@ -79,7 +79,7 @@ if [[ ! -f "${env_file}" ]]; then
     printf 'INLOCK_DATA_DIR=%s\n' "${DATA_ROOT}"
     printf 'INLOCK_ADMIN_TOKEN=%s\n' "${admin_token}"
     printf 'INLOCK_SECRET_KEY=%s\n' "${secret_key}"
-    printf 'INLOCK_PUBLIC_URL=http://localhost:8080\n'
+    printf 'INLOCK_PUBLIC_URL=http://localhost:14900\n'
     printf 'INLOCK_SECURE_COOKIES=false\n'
     printf 'INLOCK_TRUSTED_PROXIES=127.0.0.1/32,::1/128\n'
   } > "${env_file}"
@@ -102,7 +102,7 @@ User=inlock
 Group=inlock
 ${docker_group_line}
 EnvironmentFile=${env_file}
-ExecStart=${INSTALL_ROOT}/venv/bin/uvicorn inlock.main:app --host 0.0.0.0 --port 8080 --proxy-headers --forwarded-allow-ips 127.0.0.1
+ExecStart=${INSTALL_ROOT}/venv/bin/uvicorn inlock.main:app --host 0.0.0.0 --port 14900 --proxy-headers --forwarded-allow-ips 127.0.0.1
 Restart=on-failure
 RestartSec=3
 NoNewPrivileges=true
@@ -119,9 +119,9 @@ systemctl daemon-reload
 systemctl enable --now inlock.service >/dev/null
 
 for _ in {1..20}; do
-  if curl -fsS http://127.0.0.1:8080/health >/dev/null 2>&1; then
+  if curl -fsS http://127.0.0.1:14900/health >/dev/null 2>&1; then
     printf '\n\033[1;32mInlock instalado com sucesso.\033[0m\n'
-    printf 'Painel: http://SEU-IP:8080\n'
+    printf 'Painel: http://SEU-IP:14900\n'
     printf 'Token administrativo: %s\n' "${admin_token}"
     printf 'Configuração: %s\n' "${env_file}"
     printf 'Serviço: systemctl status inlock\n'
@@ -131,5 +131,4 @@ for _ in {1..20}; do
 done
 
 systemctl status inlock.service --no-pager || true
-fail "o serviço foi instalado, mas não respondeu em http://127.0.0.1:8080/health"
-
+fail "o serviço foi instalado, mas não respondeu em http://127.0.0.1:14900/health"

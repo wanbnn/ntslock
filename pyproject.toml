@@ -40,8 +40,7 @@ testpaths = ["tests"]
 asyncio_mode = "auto"
 
 [tool.prpm.scripts]
-dev = "uvicorn inlock.main:app --reload --host 0.0.0.0 --port 8080"
-serve = "uvicorn inlock.main:app --host 0.0.0.0 --port 8080"
+dev = "uvicorn inlock.main:app --reload --host 0.0.0.0 --port 14900"
+serve = "uvicorn inlock.main:app --host 0.0.0.0 --port 14900"
 test = "python -m pytest -q"
 lint = "ruff check inlock tests"
-

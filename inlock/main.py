@@ -351,7 +351,7 @@ async def proxy_by_host(path: str, request: Request):
 
 
 def run() -> None:
-    uvicorn.run("inlock.main:app", host="0.0.0.0", port=8080)
+    uvicorn.run("inlock.main:app", host="0.0.0.0", port=14900)
 
 
 if __name__ == "__main__":

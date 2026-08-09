@@ -18,7 +18,7 @@ curl -fsSL https://raw.githubusercontent.com/wanbnn/ntslock/main/install.sh | su
 
 O instalador requer Python 3.11+, cria um usuário de sistema, ambiente virtual,
 segredos, diretório de dados e serviço `systemd`. Ao terminar, ele exibe o token
-administrativo. Abra `http://IP-DO-SERVIDOR:8080` e informe esse token no painel.
+administrativo. Abra `http://IP-DO-SERVIDOR:14900` e informe esse token no painel.
 
 ## O que já funciona
 
@@ -69,7 +69,7 @@ cp .env.example .env
 prpm run dev
 ```
 
-Abra `http://localhost:8080`. Sem `INLOCK_ADMIN_TOKEN`, a API administrativa
+Abra `http://localhost:14900`. Sem `INLOCK_ADMIN_TOKEN`, a API administrativa
 aceita somente conexões loopback. Para acesso remoto, o token é obrigatório; o
 painel o solicita uma vez e o mantém no armazenamento local do navegador.
 
@@ -118,7 +118,7 @@ Exemplo Caddy:
 
 ```caddyfile
 inlock.exemplo.com, app.exemplo.com {
-    reverse_proxy 127.0.0.1:8080
+    reverse_proxy 127.0.0.1:14900
 }
 ```
 

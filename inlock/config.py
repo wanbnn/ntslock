@@ -16,7 +16,7 @@ class Settings(BaseSettings):
     database_path: Path | None = None
     secret_key: str = ""
     admin_token: str = ""
-    public_url: str = "http://localhost:8080"
+    public_url: str = "http://localhost:14900"
     admin_host: str = ""
     secure_cookies: bool = False
     access_ttl_seconds: int = 8 * 60 * 60
