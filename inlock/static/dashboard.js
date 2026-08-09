@@ -44,7 +44,7 @@ function renderProjects(target = '#project-list') {
   node.classList.remove('loading');
   node.innerHTML = state.projects.map(project => `<article class="project-card" data-project="${project.id}">
     <div class="project-icon">${project.qr_required ? '▦' : '◇'}</div><div class="project-main">
-      <div><strong>${esc(project.name)}</strong><span class="pill ${project.enabled ? 'on' : 'off'}">${project.enabled ? 'Ativo' : 'Pausado'}</span></div>
+      <div><strong>${esc(project.name)}</strong><span class="pill ${project.enabled ? 'on' : 'off'}">${project.enabled ? 'Ativo' : 'Pausado'}</span>${project.docker_container_id ? `<span class="pill ${project.isolation === 'protected' ? 'on' : 'off'}">${project.isolation === 'protected' ? 'Porta isolada' : 'Isolamento falhou'}</span>` : ''}</div>
       <small>${esc(project.public_host || `/p/${project.slug}`)} → ${esc(project.upstream_url)}</small>
       <div class="policy-chips">${project.policies.slice(0, 4).map(policy => `<span>${icons[policy.type]} ${esc(labels[policy.type])}</span>`).join('') || '<span>Sem políticas</span>'}</div>
     </div><button class="more" aria-label="Configurar ${esc(project.name)}">›</button></article>`).join('');
@@ -65,6 +65,7 @@ async function load() {
     document.querySelector('#metric-protegidos').textContent = summary.protected;
     document.querySelector('#metric-containers').textContent = summary.containers;
     document.querySelector('#metric-bloqueios').textContent = summary.blocked;
+    if (summary.isolation.managed && !summary.isolation.secure) toast(`Isolamento Docker inativo: ${summary.isolation.error}`, 'error');
     renderProjects(); renderEvents();
   } catch (error) { toast(error.message, 'error'); }
 }
@@ -92,7 +93,8 @@ function openProject(id) {
   const project = state.projects.find(item => item.id === id); state.selected = project;
   modal(`<header class="modal-head"><div><span class="overline">PROJETO</span><h2>${esc(project.name)}</h2><p>${esc(project.upstream_url)}</p></div><button data-close>×</button></header>
     <div class="project-settings"><div class="setting-strip"><div><span>Status</span><strong>${project.enabled ? 'Proteção ativa' : 'Pausado'}</strong></div><label class="mini-switch"><input id="toggle-enabled" type="checkbox" ${project.enabled ? 'checked' : ''}><i></i></label></div>
-    <div class="setting-strip"><div><span>QR Code</span><strong>${project.qr_required ? 'Obrigatório' : 'Desativado'}</strong></div><label class="mini-switch"><input id="toggle-qr" type="checkbox" ${project.qr_required ? 'checked' : ''}><i></i></label></div></div>
+    <div class="setting-strip"><div><span>QR Code</span><strong>${project.qr_required ? 'Obrigatório' : 'Desativado'}</strong></div><label class="mini-switch"><input id="toggle-qr" type="checkbox" ${project.qr_required ? 'checked' : ''}><i></i></label></div>
+    <div class="setting-strip"><div><span>Exposição direta do container</span><strong>${!project.docker_container_id ? 'Upstream não gerenciado' : project.isolation === 'protected' ? 'Bloqueada pelo host' : 'Falha no isolamento'}</strong></div><span class="pill ${project.isolation === 'protected' ? 'on' : 'off'}">${project.isolation === 'protected' ? 'Protegido' : 'Atenção'}</span></div></div>
     <div class="section-title policy-title"><div><h3>Políticas de acesso</h3><p>Avaliadas por prioridade antes do proxy.</p></div><button id="add-policy">+ Adicionar política</button></div>
     <div class="policy-list">${project.policies.map(policy => `<article><div class="policy-symbol">${icons[policy.type]}</div><div><strong>${esc(policy.name)}</strong><small>${esc(policySummary(policy))}</small></div><span>${policy.enabled ? 'Ativa' : 'Inativa'}</span><button data-delete-policy="${policy.id}">×</button></article>`).join('') || '<div class="empty compact">Nenhuma política configurada.</div>'}</div>
     <footer class="danger-zone"><a href="/p/${esc(project.slug)}" target="_blank">Abrir rota protegida ↗</a><button id="delete-project">Excluir projeto</button></footer>`, true);
@@ -165,4 +167,3 @@ function showView(view) {
 document.querySelector('#new-project').onclick = () => openProjectForm();
 document.addEventListener('click', event => { const trigger = event.target.closest('[data-view]'); if (trigger) showView(trigger.dataset.view); });
 load();
-

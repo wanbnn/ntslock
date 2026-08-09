@@ -12,6 +12,11 @@ def discover_containers(docker_url: str) -> dict[str, Any]:
         containers = []
         for container in client.containers.list(all=True):
             ports = []
+            networks = container.attrs.get("NetworkSettings", {}).get("Networks") or {}
+            container_ip = next(
+                (network.get("IPAddress") for network in networks.values() if network.get("IPAddress")),
+                "",
+            )
             for private, bindings in (container.attrs.get("NetworkSettings", {}).get("Ports") or {}).items():
                 private_port = private.split("/", 1)[0]
                 if bindings:
@@ -27,7 +32,7 @@ def discover_containers(docker_url: str) -> dict[str, Any]:
                 else:
                     ports.append({
                         "private": int(private_port), "host": None,
-                        "url": f"http://{container.name}:{private_port}",
+                        "url": f"http://{container_ip or container.name}:{private_port}",
                     })
             containers.append({
                 "id": container.id,

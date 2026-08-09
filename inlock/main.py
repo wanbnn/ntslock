@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import io
 import ipaddress
 import sqlite3
 import time
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from urllib.parse import quote
 
@@ -17,6 +18,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from .config import Settings, get_settings
+from .container_firewall import ContainerFirewall
 from .docker_discovery import discover_containers
 from .policies import Decision, PolicyEngine
 from .schemas import PolicyCreate, ProjectCreate, ProjectUpdate
@@ -44,9 +46,25 @@ async def lifespan(app: FastAPI):
     app.state.settings = settings
     app.state.store = Store(settings.database_path)
     app.state.engine = PolicyEngine(settings.geoip_city_db)
+    app.state.firewall = ContainerFirewall(
+        settings.docker_url, enabled=settings.enforce_container_isolation
+    )
+    await asyncio.to_thread(app.state.firewall.reconcile, app.state.store.projects())
     app.state.http = httpx.AsyncClient(follow_redirects=False, timeout=30)
-    yield
-    await app.state.http.aclose()
+
+    async def monitor_containers() -> None:
+        while True:
+            await asyncio.sleep(max(2, settings.container_reconcile_seconds))
+            await asyncio.to_thread(app.state.firewall.reconcile, app.state.store.projects())
+
+    monitor = asyncio.create_task(monitor_containers(), name="inlock-container-monitor")
+    try:
+        yield
+    finally:
+        monitor.cancel()
+        with suppress(asyncio.CancelledError):
+            await monitor
+        await app.state.http.aclose()
 
 
 app = FastAPI(
@@ -66,6 +84,12 @@ def settings(request: Request) -> Settings:
 
 def admin(request: Request) -> None:
     require_admin(request, settings(request).admin_token)
+
+
+async def reconcile_isolation(request: Request) -> dict:
+    return await asyncio.to_thread(
+        request.app.state.firewall.reconcile, store(request).projects()
+    )
 
 
 def _validate_policy(payload: PolicyCreate) -> None:
@@ -107,7 +131,15 @@ def _validate_policy(payload: PolicyCreate) -> None:
 
 @app.get("/health", include_in_schema=False)
 async def health(request: Request):
-    return {"status": "ok", "version": app.version, "docker": discover_containers(settings(request).docker_url)["available"]}
+    docker_available = discover_containers(settings(request).docker_url)["available"]
+    isolation = request.app.state.firewall.status()
+    healthy = docker_available and (not isolation["managed"] or isolation["secure"])
+    return {
+        "status": "ok" if healthy else "degraded",
+        "version": app.version,
+        "docker": docker_available,
+        "container_isolation": isolation,
+    }
 
 
 @app.get("/", response_class=HTMLResponse, include_in_schema=False)
@@ -130,14 +162,21 @@ async def summary(request: Request):
         "containers": len(docker["containers"]),
         "blocked": sum(1 for event in events if event["outcome"] == "denied"),
         "docker_available": docker["available"],
+        "isolation": request.app.state.firewall.status(),
     }
 
 
 @app.get("/api/projects", dependencies=[Depends(admin)])
 async def list_projects(request: Request):
+    isolation = request.app.state.firewall.status()
     result = []
     for project in store(request).projects():
         project["policies"] = store(request).policies(project["id"])
+        project["isolation"] = (
+            "protected" if project["docker_container_id"] and isolation["secure"]
+            else "unmanaged" if not project["docker_container_id"]
+            else "error"
+        )
         result.append(project)
     return result
 
@@ -148,6 +187,17 @@ async def create_project(payload: ProjectCreate, request: Request):
         project = store(request).create_project(payload.model_dump())
     except sqlite3.IntegrityError:
         raise HTTPException(409, "Já existe um projeto com este slug") from None
+    isolation = await reconcile_isolation(request)
+    if project["docker_container_id"] and not isolation["secure"]:
+        store(request).audit(
+            project["id"], "container.isolation", "denied", error=isolation["error"]
+        )
+        store(request).delete_project(project["id"])
+        await reconcile_isolation(request)
+        raise HTTPException(
+            503,
+            f"Projeto não ativado: não foi possível bloquear a exposição direta do container ({isolation['error']})",
+        )
     store(request).audit(project["id"], "project.created", "success", name=project["name"])
     return project
 
@@ -163,6 +213,17 @@ async def update_project(project_id: int, payload: ProjectUpdate, request: Reque
         project = store(request).update_project(project_id, validated)
     except sqlite3.IntegrityError:
         raise HTTPException(409, "Já existe um projeto com este slug") from None
+    isolation = await reconcile_isolation(request)
+    if project["docker_container_id"] and not isolation["secure"]:
+        store(request).audit(
+            project_id, "container.isolation", "denied", error=isolation["error"]
+        )
+        store(request).update_project(project_id, current)
+        await reconcile_isolation(request)
+        raise HTTPException(
+            503,
+            f"Alteração revertida: não foi possível isolar o container ({isolation['error']})",
+        )
     store(request).audit(project_id, "project.updated", "success", fields=list(changes))
     return project
 
@@ -171,6 +232,7 @@ async def update_project(project_id: int, payload: ProjectUpdate, request: Reque
 async def delete_project(project_id: int, request: Request):
     if not store(request).delete_project(project_id):
         raise HTTPException(404, "Projeto não encontrado")
+    await reconcile_isolation(request)
     return Response(status_code=204)
 
 

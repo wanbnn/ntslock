@@ -5,7 +5,10 @@ WORKDIR /app
 
 COPY pyproject.toml README.md ./
 COPY inlock ./inlock
-RUN python -m pip install --no-cache-dir .
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends iptables \
+    && rm -rf /var/lib/apt/lists/* \
+    && python -m pip install --no-cache-dir .
 
 RUN useradd --system --uid 10001 --create-home inlock && mkdir -p /data && chown inlock:inlock /data
 USER inlock

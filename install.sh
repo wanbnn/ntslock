@@ -30,7 +30,7 @@ command -v apt-get >/dev/null || fail "apt-get não encontrado"
 log "Instalando dependências do sistema"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
-apt-get install -y -qq ca-certificates curl openssl python3 python3-venv >/dev/null
+apt-get install -y -qq ca-certificates curl iptables openssl python3 python3-venv >/dev/null
 
 python3 - <<'PY' || fail "Python 3.11+ é necessário; atualize o Python da distribuição"
 import sys
@@ -82,10 +82,19 @@ if [[ ! -f "${env_file}" ]]; then
     printf 'INLOCK_PUBLIC_URL=http://localhost:14900\n'
     printf 'INLOCK_SECURE_COOKIES=false\n'
     printf 'INLOCK_TRUSTED_PROXIES=127.0.0.1/32,::1/128\n'
+    printf 'INLOCK_ENFORCE_CONTAINER_ISOLATION=true\n'
+    printf 'INLOCK_CONTAINER_RECONCILE_SECONDS=10\n'
   } > "${env_file}"
   chown root:inlock "${env_file}"
   chmod 0640 "${env_file}"
 else
+  sed -i 's|^INLOCK_PUBLIC_URL=http://localhost:8080$|INLOCK_PUBLIC_URL=http://localhost:14900|' "${env_file}"
+  if ! grep -q '^INLOCK_ENFORCE_CONTAINER_ISOLATION=' "${env_file}"; then
+    printf 'INLOCK_ENFORCE_CONTAINER_ISOLATION=true\n' >> "${env_file}"
+  fi
+  if ! grep -q '^INLOCK_CONTAINER_RECONCILE_SECONDS=' "${env_file}"; then
+    printf 'INLOCK_CONTAINER_RECONCILE_SECONDS=10\n' >> "${env_file}"
+  fi
   admin_token="$(sed -n 's/^INLOCK_ADMIN_TOKEN=//p' "${env_file}" | head -n 1)"
 fi
 
@@ -110,13 +119,16 @@ PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
 ReadWritePaths=${DATA_ROOT}
+CapabilityBoundingSet=CAP_NET_ADMIN
+AmbientCapabilities=CAP_NET_ADMIN
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
 systemctl daemon-reload
-systemctl enable --now inlock.service >/dev/null
+systemctl enable inlock.service >/dev/null
+systemctl restart inlock.service
 
 for _ in {1..20}; do
   if curl -fsS http://127.0.0.1:14900/health >/dev/null 2>&1; then

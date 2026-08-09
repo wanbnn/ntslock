@@ -24,6 +24,8 @@ class Settings(BaseSettings):
     trusted_proxies: Annotated[list[str], NoDecode] = ["127.0.0.1/32", "::1/128"]
     geoip_city_db: Path | None = None
     docker_url: str = "unix:///var/run/docker.sock"
+    enforce_container_isolation: bool = True
+    container_reconcile_seconds: int = 10
     tile_url: str = "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
 
     @field_validator("trusted_proxies", mode="before")

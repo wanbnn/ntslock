@@ -23,6 +23,7 @@ administrativo. Abra `http://IP-DO-SERVIDOR:14900` e informe esse token no paine
 ## O que já funciona
 
 - descoberta automática de containers, imagens, estados e portas pelo Docker;
+- isolamento automático das portas publicadas na cadeia `DOCKER-USER`;
 - projetos por host (`app.exemplo.com`) ou rota (`/p/<slug>`);
 - reverse proxy HTTP com preservação dos cabeçalhos de encaminhamento;
 - rate limit por IP ou global com janela deslizante;
@@ -52,6 +53,14 @@ O servidor armazena o hash desse valor, expira o desafio em 60 segundos,
 invalida o QR anterior na rotação e libera apenas o navegador que iniciou o
 desafio. Copiar uma URL direta do upstream não funciona quando a aplicação está
 exposta somente pela rede Docker e o Inlock é seu único ponto de entrada.
+
+Ao selecionar um container, o Inlock também gerencia sua exposição no host. As
+portas Docker publicadas continuam disponíveis localmente para o proxy, mas
+conexões externas diretas são descartadas por uma cadeia própria,
+`INLOCK_GUARD`, antes de chegarem ao container. Se o Docker ou o firewall não
+puderem ser gerenciados, o cadastro é recusado: o sistema não apresenta uma
+proteção falsa. O estado e as portas são reconciliados novamente a cada 10
+segundos para acompanhar reinícios e mudanças nos containers.
 
 Nenhum QR Code pode provar presença física absoluta: uma transmissão ao vivo ou
 foto do código ainda pode ser lida remotamente dentro dos 60 segundos. Para
@@ -103,16 +112,28 @@ leitura. O Inlock usa apenas `ping` e listagem/inspeção de containers, mas em 
 instalação endurecida prefira um proxy de socket que permita exclusivamente
 `/_ping`, `/containers/json` e `/containers/*/json`.
 
+O Compose usa a rede do host e concede somente `CAP_NET_ADMIN` para que o
+Inlock alcance as portas locais dos containers e mantenha sua cadeia de
+firewall. Confira o isolamento ativo com:
+
+```bash
+sudo iptables -S INLOCK_GUARD
+```
+
 ## Publicar uma aplicação
 
 1. No painel, abra **Containers** e escolha **Proteger container**.
-2. Confirme a URL upstream. Containers na mesma rede podem usar
-   `http://nome-do-container:porta`; portas publicadas usam `127.0.0.1:porta` em
-   instalação nativa.
+2. Confirme a URL upstream descoberta. Portas publicadas usam
+   `127.0.0.1:porta`; serviços sem publicação usam o IP privado da rede Docker.
 3. Defina um host público, por exemplo `app.exemplo.com`, ou use `/p/meu-app`.
 4. Ative o QR Code e adicione as políticas necessárias.
 5. Aponte seu proxy TLS (Caddy, Traefik ou Nginx) para o Inlock, nunca diretamente
    para o container protegido.
+
+No momento do cadastro, o Inlock inspeciona todas as portas do container e
+bloqueia os bindings públicos no firewall do host. O upstream não é modificado
+nem recebe código injetado; o controle ocorre no ponto correto da rede Docker,
+impedindo o bypass mesmo que alguém descubra a antiga porta publicada.
 
 Exemplo Caddy:
 
@@ -152,8 +173,8 @@ INLOCK_TILE_URL=https://tiles.seudominio/{z}/{x}/{y}.png
   backend por Redis antes de escalar horizontalmente.
 - WebSocket e streaming de corpos grandes ainda não são encaminhados nesta
   primeira versão; HTTP convencional funciona normalmente.
-- Mantenha upstreams inacessíveis pela rede pública, ou usuários poderão
-  contornar qualquer reverse proxy conhecendo a porta direta.
+- Mantenha upstreams não gerenciados inacessíveis pela rede pública. Em projetos
+  vinculados a containers, o `INLOCK_GUARD` realiza esse bloqueio automaticamente.
 
 ## Estrutura
 

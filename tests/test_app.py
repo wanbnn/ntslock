@@ -54,6 +54,30 @@ def test_project_and_policy_crud(client):
     assert invalid.status_code == 422
 
 
+def test_container_project_is_rejected_when_direct_port_cannot_be_isolated(client):
+    browser, headers = client
+
+    class FailingFirewall:
+        def reconcile(self, projects):
+            return self.status()
+
+        def status(self):
+            return {
+                "enabled": True, "available": False, "secure": False,
+                "managed": True, "containers": ["abc"], "protected_ports": [],
+                "loopback_ports": [], "error": "CAP_NET_ADMIN ausente",
+            }
+
+    app.state.firewall = FailingFirewall()
+    response = browser.post("/api/projects", headers=headers, json={
+        "name": "Exposto", "slug": "exposto", "upstream_url": "http://127.0.0.1:8088",
+        "docker_container_id": "abc", "qr_required": True,
+    })
+    assert response.status_code == 503
+    assert "não foi possível bloquear" in response.json()["detail"]
+    assert browser.get("/api/projects", headers=headers).json() == []
+
+
 def test_qr_token_rotation_and_browser_bound_approval(client):
     browser, headers = client
     project = create_project(browser, headers)
