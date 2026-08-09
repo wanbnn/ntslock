@@ -1,8 +1,8 @@
 {
   "lockVersion": 1,
-  "generatedAt": "2026-08-09T02:30:27.341811+00:00",
+  "generatedAt": "2026-08-09T05:34:57.823954+00:00",
   "python": "3.14.6",
-  "contentHash": "sha256:afe858bcf8112c133379bf5aa7c0915334d6542503fb231c06db963cf3c8227a",
+  "contentHash": "sha256:e5940eb099f3bdd70e4c91a8a29461164bcc5fef74440f88c299efd2c838d617",
   "packages": [
     {
       "name": "6cons",
@@ -266,6 +266,17 @@
       "url": "https://files.pythonhosted.org/packages/63/34/ba1c580383c9eada3711951fef0795c80b829a078d72188184bcab9dd527/packaging-26.3-py3-none-any.whl",
       "hashes": [
         "d7193f7c8e4e93f444fde0262bf90af30e16fa0ad0ad44cb553c87339b23cd1c"
+      ]
+    },
+    {
+      "name": "pillow",
+      "version": "12.3.0",
+      "direct": true,
+      "dev": false,
+      "requirement": "pillow==12.3.0",
+      "url": "https://files.pythonhosted.org/packages/5c/44/c85361f65dbe00eea8576ee467c768d25129989efb76e94f205e9ca9bb46/pillow-12.3.0-cp314-cp314-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl",
+      "hashes": [
+        "251bf95b67017e27b13d82f5b326234ca62d70f9cf4c2b9032de2358a3b12c7b"
       ]
     },
     {

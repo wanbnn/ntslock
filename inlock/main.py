@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hmac
 import io
 import ipaddress
 import sqlite3
@@ -17,6 +18,7 @@ from fastapi import Depends, FastAPI, Form, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
+from .captcha import create_visual_challenge, render_visual_challenge
 from .config import Settings, get_settings
 from .container_firewall import ContainerFirewall
 from .docker_discovery import discover_containers
@@ -32,7 +34,7 @@ from .security import (
     verify_access,
 )
 from .store import Store
-from .ui import approval_html, approved_html, dashboard_html, gate_html
+from .ui import approval_html, approved_html, captcha_html, dashboard_html, gate_html
 
 HOP_BY_HOP = {
     "connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te",
@@ -102,6 +104,54 @@ async def reconcile_isolation(request: Request) -> dict:
     )
 
 
+def request_return_path(request: Request) -> str:
+    path = request.url.path
+    return f"{path}?{request.url.query}" if request.url.query else path
+
+
+def captcha_answer_hash(challenge_id: str, selected: str) -> str:
+    try:
+        indexes = sorted({int(value) for value in selected.split(",") if value != ""})
+    except ValueError:
+        indexes = []
+    if any(index < 0 or index > 8 for index in indexes):
+        indexes = []
+    return token_hash(f"{challenge_id}:{','.join(map(str, indexes))}")
+
+
+def human_challenge_response(
+    request: Request, project: dict, return_path: str, bot_score: int
+) -> HTMLResponse:
+    config = settings(request)
+    browser_secret = request.cookies.get("inlock_human_browser") or random_token()
+    challenge_id = random_token(18)
+    payload, answer = create_visual_challenge()
+    now = int(time.time())
+    store(request).save_captcha({
+        "id": challenge_id,
+        "project_id": project["id"],
+        "browser_hash": browser_hash(browser_secret, config.secret_key),
+        "answer_hash": captcha_answer_hash(challenge_id, ",".join(map(str, answer))),
+        "payload": payload,
+        "return_path": return_path,
+        "expires_at": now + config.captcha_ttl_seconds,
+        "created_at": now,
+    })
+    store(request).audit(
+        project["id"], "bot.challenge", "challenged",
+        client_ip(request, config.trusted_proxies), score=bot_score,
+    )
+    response = HTMLResponse(
+        captcha_html(project, challenge_id, payload["target_label"]),
+        headers={"Cache-Control": "no-store"},
+    )
+    response.set_cookie(
+        "inlock_human_browser", browser_secret, max_age=config.captcha_ttl_seconds,
+        httponly=True, secure=config.secure_cookies, samesite="lax", path="/",
+    )
+    return response
+
+
 def _validate_policy(payload: PolicyCreate) -> None:
     config = payload.config
     if payload.type in {"ip_allowlist", "ip_blocklist"}:
@@ -137,6 +187,13 @@ def _validate_policy(payload: PolicyCreate) -> None:
                 raise HTTPException(422, "radius contém valores inválidos") from None
             if not -90 <= latitude <= 90 or not -180 <= longitude <= 180 or kilometers <= 0:
                 raise HTTPException(422, "latitude, longitude ou raio fora dos limites")
+    if payload.type == "bot_score":
+        try:
+            threshold = int(config.get("threshold", 65))
+        except (TypeError, ValueError):
+            raise HTTPException(422, "threshold deve ser um número entre 0 e 100") from None
+        if not 0 <= threshold <= 100:
+            raise HTTPException(422, "threshold deve estar entre 0 e 100")
 
 
 @app.get("/health", include_in_schema=False)
@@ -280,6 +337,77 @@ async def events(request: Request, limit: int = 50):
     return store(request).events(min(max(limit, 1), 250))
 
 
+@app.get("/gate/captcha/{challenge_id}.png", include_in_schema=False)
+async def captcha_image(challenge_id: str, request: Request):
+    challenge = store(request).captcha(challenge_id)
+    if not challenge or challenge["expires_at"] < int(time.time()):
+        raise HTTPException(410, "Desafio expirado")
+    return Response(
+        render_visual_challenge(challenge["payload"]),
+        media_type="image/png",
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.post("/gate/captcha/verify", include_in_schema=False)
+async def verify_captcha(
+    request: Request, challenge_id: str = Form(...), selected: str = Form("")
+):
+    challenge = store(request).captcha(challenge_id)
+    browser_secret = request.cookies.get("inlock_human_browser", "")
+    config = settings(request)
+    now = int(time.time())
+    if (
+        not challenge or not browser_secret
+        or not hmac.compare_digest(
+            challenge["browser_hash"], browser_hash(browser_secret, config.secret_key)
+        )
+    ):
+        raise HTTPException(404, "Desafio não encontrado")
+    project = store(request).project(challenge["project_id"])
+    if (
+        not project or challenge["state"] != "pending"
+        or challenge["expires_at"] < now
+    ):
+        return HTMLResponse(
+            captcha_html(
+                project or {"name": "Acesso protegido"}, challenge_id,
+                challenge["payload"]["target_label"], "Desafio expirado. Recarregue a página."
+            ),
+            410,
+        )
+    supplied_hash = captcha_answer_hash(challenge_id, selected)
+    if not hmac.compare_digest(supplied_hash, challenge["answer_hash"]):
+        attempts = store(request).fail_captcha(challenge_id)
+        exhausted = attempts >= 3
+        message = (
+            "Tentativas esgotadas. Recarregue a página para gerar outro desafio."
+            if exhausted else f"Seleção incorreta. Restam {3 - attempts} tentativa(s)."
+        )
+        store(request).audit(
+            project["id"], "bot.challenge", "failed",
+            client_ip(request, config.trusted_proxies), attempts=attempts,
+        )
+        return HTMLResponse(
+            captcha_html(project, challenge_id, challenge["payload"]["target_label"], message),
+            429 if exhausted else 400,
+        )
+    if not store(request).solve_captcha(challenge_id, now):
+        raise HTTPException(410, "Desafio expirado")
+    response = RedirectResponse(challenge["return_path"] or "/", status_code=303)
+    response.set_cookie(
+        f"inlock_human_{project['id']}",
+        sign_access(project["id"], config.secret_key, config.human_session_ttl_seconds),
+        max_age=config.human_session_ttl_seconds, httponly=True,
+        secure=config.secure_cookies, samesite="lax", path="/",
+    )
+    store(request).audit(
+        project["id"], "bot.challenge", "solved",
+        client_ip(request, config.trusted_proxies),
+    )
+    return response
+
+
 @app.post("/api/gate/{slug}/challenge", include_in_schema=False)
 async def create_challenge(slug: str, request: Request):
     project = store(request).project_by_slug(slug)
@@ -398,11 +526,22 @@ async def proxy_by_slug(slug: str, request: Request, path: str = ""):
 async def proxy_request(request: Request, project: dict, path: str):
     config = settings(request)
     ip = client_ip(request, config.trusted_proxies)
+    human_access = request.cookies.get(f"inlock_human_{project['id']}", "")
+    human_verified = verify_access(human_access, project["id"], config.secret_key)
     decision: Decision = await request.app.state.engine.evaluate(
-        project, store(request).policies(project["id"]), ip, request.headers.get("user-agent", "")
+        project, store(request).policies(project["id"]), ip,
+        request.headers.get("user-agent", ""), headers=request.headers,
+        human_verified=human_verified,
     )
     if not decision.allowed:
-        store(request).audit(project["id"], "request", "denied", ip, reason=decision.reason, policy_id=decision.policy_id)
+        if decision.reason == "bot_suspected":
+            return human_challenge_response(
+                request, project, request_return_path(request), decision.bot_score or 0
+            )
+        store(request).audit(
+            project["id"], "request", "denied", ip, reason=decision.reason,
+            policy_id=decision.policy_id, bot_score=decision.bot_score,
+        )
         headers = {"Retry-After": str(decision.retry_after)} if decision.retry_after else None
         return JSONResponse({"detail": "Acesso negado", "reason": decision.reason}, 429 if decision.reason == "rate_limited" else 403, headers=headers)
     if project["qr_required"]:

@@ -111,3 +111,33 @@ def approval_html(token: str, project_name: str, expired: bool = False) -> str:
 
 def approved_html() -> str:
     return """<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Acesso confirmado</title><link rel="stylesheet" href="/static/gate.css"></head><body><main class="mobile-confirm success"><div class="mobile-mark">✓</div><p class="eyebrow">ACESSO CONFIRMADO</p><h1>Tudo certo.</h1><p>O navegador original será liberado. Você já pode fechar esta página.</p></main></body></html>"""
+
+
+def captcha_html(
+    project: dict, challenge_id: str, target_label: str, error: str = ""
+) -> str:
+    error_markup = f'<p class="captcha-error" role="alert">{html.escape(error)}</p>' if error else ""
+    cells = "".join(
+        f'<button type="button" data-cell="{index}" aria-label="Selecionar célula {index + 1}"></button>'
+        for index in range(9)
+    )
+    return f"""<!doctype html><html lang="pt-BR"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>Verificação humana · {html.escape(project['name'])}</title>
+<link rel="stylesheet" href="/static/gate.css"><link rel="stylesheet" href="/static/captcha.css"></head><body>
+<main class="gate human-gate" data-challenge="{html.escape(challenge_id)}">
+ <section class="gate-copy"><a class="gate-brand" href="#"><span>◆</span> inlock</a>
+  <p class="eyebrow">NAVEGAÇÃO SUSPEITA</p><h1>Precisamos confirmar<br>que você é humano.</h1>
+  <p class="lead">O comportamento desta requisição atingiu o limite de bot score. Resolva o desafio visual para continuar com segurança.</p>
+  <div class="trust"><span>✓</span><div><strong>Desafio efêmero</strong><small>A resposta é validada somente no servidor e expira em poucos minutos.</small></div></div>
+  <div class="trust"><span>✓</span><div><strong>Privacidade preservada</strong><small>Nenhum rastreador ou serviço CAPTCHA externo é utilizado.</small></div></div>
+ </section>
+ <section class="captcha-card"><div class="qr-head"><span class="live-dot warning"></span><span>VERIFICAÇÃO HUMANA</span><span>3 tentativas</span></div>
+  <h2>Selecione todos os itens<br><strong>“{html.escape(target_label)}”</strong></h2>
+  <form method="post" action="/gate/captcha/verify" id="captcha-form">
+   <div class="captcha-board"><img src="/gate/captcha/{html.escape(challenge_id)}.png" alt="Grade visual com nove formas"><div class="captcha-cells">{cells}</div></div>
+   <input type="hidden" name="challenge_id" value="{html.escape(challenge_id)}"><input type="hidden" name="selected" id="captcha-selected">
+   {error_markup}<p id="captcha-hint">Toque nas células correspondentes e confirme.</p>
+   <button class="captcha-submit" type="submit">Confirmar que sou humano</button>
+  </form>
+ </section>
+</main><script src="/static/captcha.js" defer></script></body></html>"""

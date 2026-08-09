@@ -58,7 +58,9 @@ class ProjectUpdate(BaseModel):
     qr_totem_mode: bool | None = None
 
 
-PolicyType = Literal["rate_limit", "geo", "user_agent", "ip_allowlist", "ip_blocklist"]
+PolicyType = Literal[
+    "rate_limit", "geo", "user_agent", "ip_allowlist", "ip_blocklist", "bot_score"
+]
 
 
 class PolicyCreate(BaseModel):

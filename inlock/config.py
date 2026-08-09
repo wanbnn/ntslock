@@ -21,6 +21,8 @@ class Settings(BaseSettings):
     secure_cookies: bool = False
     access_ttl_seconds: int = 8 * 60 * 60
     qr_ttl_seconds: int = 60
+    captcha_ttl_seconds: int = 180
+    human_session_ttl_seconds: int = 30 * 60
     trusted_proxies: Annotated[list[str], NoDecode] = ["127.0.0.1/32", "::1/128"]
     geoip_city_db: Path | None = None
     docker_url: str = "unix:///var/run/docker.sock"

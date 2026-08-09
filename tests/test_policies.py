@@ -1,6 +1,6 @@
 import pytest
 
-from inlock.policies import PolicyEngine
+from inlock.policies import PolicyEngine, calculate_bot_score
 
 PROJECT = {"id": 1}
 
@@ -46,3 +46,35 @@ async def test_geo_unknown_is_fail_closed_by_default():
     assert denied.reason == "location_unknown"
     assert allowed.allowed
 
+
+@pytest.mark.asyncio
+async def test_bot_score_challenges_automation_and_accepts_verified_human():
+    engine = PolicyEngine()
+    policies = [policy("bot_score", {"threshold": 65})]
+    headers = {"accept": "*/*", "user-agent": "curl/8.12.0"}
+
+    suspected = await engine.evaluate(
+        PROJECT, policies, "10.0.0.1", headers["user-agent"], headers=headers,
+    )
+    verified = await engine.evaluate(
+        PROJECT, policies, "10.0.0.1", headers["user-agent"], headers=headers,
+        human_verified=True,
+    )
+
+    assert not suspected.allowed
+    assert suspected.reason == "bot_suspected"
+    assert suspected.bot_score >= 65
+    assert verified.allowed
+
+
+def test_bot_score_distinguishes_browser_headers_from_command_line_client():
+    browser_headers = {
+        "accept": "text/html,application/xhtml+xml",
+        "accept-language": "pt-BR,pt;q=0.9",
+        "accept-encoding": "gzip, deflate, br",
+        "sec-fetch-site": "none",
+    }
+    browser_agent = "Mozilla/5.0 Chrome/126.0 Safari/537.36"
+
+    assert calculate_bot_score(browser_headers, browser_agent) == 0
+    assert calculate_bot_score({"accept": "*/*"}, "curl/8.12.0") >= 75

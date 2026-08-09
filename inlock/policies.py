@@ -6,6 +6,7 @@ import ipaddress
 import math
 import time
 from collections import defaultdict, deque
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -19,6 +20,34 @@ class Decision:
     reason: str = "allowed"
     policy_id: int | None = None
     retry_after: int | None = None
+    bot_score: int | None = None
+
+
+def calculate_bot_score(headers: Mapping[str, str] | None, user_agent: str) -> int:
+    """Return a local bot-likelihood score where 0 is browser-like and 100 is automated."""
+    normalized = {str(key).lower(): str(value) for key, value in (headers or {}).items()}
+    agent = user_agent.casefold().strip()
+    score = 0
+    strong_markers = (
+        "bot", "crawler", "spider", "scrapy", "curl/", "wget/", "python-requests",
+        "python-httpx", "aiohttp", "go-http-client", "headlesschrome", "phantomjs",
+        "selenium", "playwright",
+    )
+    if not agent or any(marker in agent for marker in strong_markers):
+        score += 75
+    elif "mozilla/5.0" not in agent:
+        score += 20
+    if not normalized.get("accept"):
+        score += 10
+    if not normalized.get("accept-language"):
+        score += 8
+    if not normalized.get("accept-encoding"):
+        score += 5
+    if not normalized.get("sec-fetch-site") and "mozilla/5.0" in agent:
+        score += 8
+    if normalized.get("webdriver", "").casefold() in {"1", "true", "yes"}:
+        score += 45
+    return min(100, score)
 
 
 class RateLimiter:
@@ -89,7 +118,9 @@ class PolicyEngine:
         self.geo = GeoLocator(geo_database)
 
     async def evaluate(
-        self, project: dict[str, Any], policies: list[dict[str, Any]], ip: str, user_agent: str
+        self, project: dict[str, Any], policies: list[dict[str, Any]], ip: str,
+        user_agent: str, headers: Mapping[str, str] | None = None,
+        human_verified: bool = False,
     ) -> Decision:
         location: dict[str, Any] | None = None
         for policy in policies:
@@ -118,6 +149,15 @@ class PolicyEngine:
                 )
                 if not allowed:
                     return Decision(False, "rate_limited", policy["id"], retry_after)
+            elif policy_type == "bot_score":
+                if human_verified:
+                    continue
+                score = calculate_bot_score(headers, user_agent)
+                threshold = min(100, max(0, int(config.get("threshold", 65))))
+                if score >= threshold:
+                    return Decision(
+                        False, "bot_suspected", policy["id"], bot_score=score
+                    )
             elif policy_type == "geo":
                 if location is None:
                     location = self.geo.locate(ip)

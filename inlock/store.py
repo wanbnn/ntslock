@@ -46,6 +46,19 @@ CREATE TABLE IF NOT EXISTS challenges (
     created_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_challenge_expiry ON challenges(expires_at);
+CREATE TABLE IF NOT EXISTS captcha_challenges (
+    id TEXT PRIMARY KEY,
+    project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    browser_hash TEXT NOT NULL,
+    answer_hash TEXT NOT NULL,
+    payload TEXT NOT NULL,
+    return_path TEXT NOT NULL DEFAULT '/',
+    state TEXT NOT NULL DEFAULT 'pending',
+    attempts INTEGER NOT NULL DEFAULT 0,
+    expires_at INTEGER NOT NULL,
+    created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_captcha_expiry ON captcha_challenges(expires_at);
 CREATE TABLE IF NOT EXISTS audit_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     project_id INTEGER REFERENCES projects(id) ON DELETE SET NULL,
@@ -232,6 +245,53 @@ class Store:
     def prune_challenges(self, before: int) -> None:
         with self._lock, self.connect() as db:
             db.execute("DELETE FROM challenges WHERE expires_at<?", (before,))
+
+    def save_captcha(self, values: dict[str, Any]) -> None:
+        with self._lock, self.connect() as db:
+            db.execute(
+                """INSERT INTO captcha_challenges
+                (id,project_id,browser_hash,answer_hash,payload,return_path,state,attempts,expires_at,created_at)
+                VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    values["id"], values["project_id"], values["browser_hash"],
+                    values["answer_hash"], json.dumps(values["payload"]),
+                    values.get("return_path", "/"), "pending", 0,
+                    values["expires_at"], values["created_at"],
+                ),
+            )
+
+    def captcha(self, challenge_id: str) -> dict[str, Any] | None:
+        with self.connect() as db:
+            row = db.execute(
+                "SELECT * FROM captcha_challenges WHERE id=?", (challenge_id,)
+            ).fetchone()
+            if not row:
+                return None
+            item = dict(row)
+            item["payload"] = json.loads(item["payload"])
+            return item
+
+    def solve_captcha(self, challenge_id: str, now: int) -> bool:
+        with self._lock, self.connect() as db:
+            return db.execute(
+                """UPDATE captcha_challenges SET state='solved'
+                WHERE id=? AND state='pending' AND expires_at>=?""",
+                (challenge_id, now),
+            ).rowcount > 0
+
+    def fail_captcha(self, challenge_id: str) -> int:
+        with self._lock, self.connect() as db:
+            db.execute(
+                """UPDATE captcha_challenges
+                SET attempts=attempts+1,
+                    state=CASE WHEN attempts+1>=3 THEN 'failed' ELSE state END
+                WHERE id=? AND state='pending'""",
+                (challenge_id,),
+            )
+            row = db.execute(
+                "SELECT attempts FROM captcha_challenges WHERE id=?", (challenge_id,)
+            ).fetchone()
+            return int(row["attempts"]) if row else 3
 
     def audit(self, project_id: int | None, action: str, outcome: str, client_ip: str = "", **detail) -> None:
         with self._lock, self.connect() as db:

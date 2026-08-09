@@ -30,6 +30,7 @@ administrativo. Abra `http://IP-DO-SERVIDOR:14900` e informe esse token no paine
 - rate limit por IP ou global com janela deslizante;
 - whitelist e blacklist com IPv4, IPv6 e CIDR;
 - bloqueio de user-agent com padrões glob (`*bot*`, `curl/*`);
+- bot score local de 0 a 100 com threshold configurável e desafio visual;
 - limites por país, estado, cidade ou raio desenhado no Leaflet;
 - auditoria de decisões e eventos no SQLite;
 - desafio por QR Code renovado automaticamente a cada 60 segundos;
@@ -82,6 +83,24 @@ ou aprovação em um dispositivo previamente registrado.
 
 O switch **Modo totem** fica nas configurações do projeto e, quando ativado,
 mantém automaticamente a exigência de QR Code ligada.
+
+## Bot score e verificação humana
+
+A política **Bot score** calcula uma probabilidade local de automação usando
+sinais da requisição, como user-agent de ferramentas, ausência dos cabeçalhos
+comuns de navegação e indicadores de webdriver. O valor vai de 0 (aparência
+humana) a 100 (forte suspeita). Quando ele atinge o threshold configurado, o
+Inlock substitui a aplicação por uma tela de navegação suspeita.
+
+O visitante seleciona formas e cores em uma grade gerada localmente. O desafio
+expira, permite no máximo três tentativas, é vinculado ao navegador e sua resposta
+é validada no servidor. Ao acertar, recebe uma sessão `HttpOnly` assinada de 30
+minutos e volta à URL original; as demais políticas e o QR Code continuam sendo
+avaliados normalmente. Nenhum provedor externo de CAPTCHA é utilizado.
+
+Bot score heurístico não é uma prova de identidade e cabeçalhos podem ser
+imitados. Use-o como uma camada contra automação oportunista, combinado com rate
+limit, listas de IP e autenticação da aplicação.
 
 ## Executar em desenvolvimento
 

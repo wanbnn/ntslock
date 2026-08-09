@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 import httpx
@@ -184,6 +185,58 @@ def test_proxy_after_qr_approval(client):
         response = browser.get("/p/demo/private/dashboard")
         assert response.status_code == 200
         assert response.text == "upstream:/private/dashboard"
+    finally:
+        browser.portal.call(app.state.http.aclose)
+        app.state.http = old
+
+
+def test_bot_score_visual_challenge_releases_only_the_verified_browser(client):
+    browser, headers = client
+    project = create_project(browser, headers, qr=False)
+    policy = browser.post(
+        f"/api/projects/{project['id']}/policies", headers=headers,
+        json={"type": "bot_score", "name": "Anti-bot", "config": {"threshold": 65}},
+    )
+    assert policy.status_code == 201
+
+    challenged = browser.get(
+        "/p/demo/private/dashboard?from=captcha",
+        headers={"user-agent": "curl/8.12.0", "accept": "*/*"},
+    )
+    assert challenged.status_code == 200
+    assert "NAVEGAÇÃO SUSPEITA" in challenged.text
+    challenge_id = re.search(r'data-challenge="([^"]+)"', challenged.text).group(1)
+
+    image = browser.get(f"/gate/captcha/{challenge_id}.png")
+    assert image.status_code == 200
+    assert image.headers["content-type"] == "image/png"
+
+    challenge = app.state.store.captcha(challenge_id)
+    payload = challenge["payload"]
+    correct = [
+        str(index) for index, cell in enumerate(payload["cells"])
+        if cell["shape"] == payload["target_shape"]
+        and cell["color"] == payload["target_color"]
+    ]
+    solved = browser.post(
+        "/gate/captcha/verify", follow_redirects=False,
+        data={"challenge_id": challenge_id, "selected": ",".join(correct)},
+    )
+    assert solved.status_code == 303
+    assert solved.headers["location"] == "/p/demo/private/dashboard?from=captcha"
+    assert f"inlock_human_{project['id']}" in browser.cookies
+
+    async def upstream(request: httpx.Request):
+        return httpx.Response(200, text=f"human:{request.url.path}")
+
+    old = app.state.http
+    app.state.http = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+    try:
+        released = browser.get(
+            solved.headers["location"], headers={"user-agent": "curl/8.12.0"},
+        )
+        assert released.status_code == 200
+        assert released.text == "human:/private/dashboard"
     finally:
         browser.portal.call(app.state.http.aclose)
         app.state.http = old
