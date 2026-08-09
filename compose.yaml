@@ -1,0 +1,23 @@
+services:
+  inlock:
+    build: .
+    restart: unless-stopped
+    environment:
+      INLOCK_DATA_DIR: /data
+      INLOCK_ADMIN_TOKEN: ${INLOCK_ADMIN_TOKEN:?configure INLOCK_ADMIN_TOKEN}
+      INLOCK_SECRET_KEY: ${INLOCK_SECRET_KEY:?configure INLOCK_SECRET_KEY}
+      INLOCK_PUBLIC_URL: ${INLOCK_PUBLIC_URL:-http://localhost:8080}
+      INLOCK_SECURE_COOKIES: ${INLOCK_SECURE_COOKIES:-false}
+      INLOCK_TRUSTED_PROXIES: ${INLOCK_TRUSTED_PROXIES:-172.16.0.0/12}
+    ports:
+      - "8080:8080"
+    volumes:
+      - inlock-data:/data
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    group_add:
+      - "${DOCKER_GID:-0}"
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  inlock-data:

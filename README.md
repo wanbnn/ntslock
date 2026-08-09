@@ -1,0 +1,171 @@
+# Inlock
+
+Inlock é um firewall de aplicação e reverse proxy para serviços locais e
+containers Docker. Cada projeto recebe uma rota protegida e uma cadeia de
+políticas avaliada antes de qualquer requisição chegar ao upstream.
+
+O painel é renderizado com [PyReact](https://github.com/wanbnn/pyreact), usa
+[UIKitPR](https://github.com/wanbnn/uikitpr), ícones nativos do
+[6cons](https://github.com/wanbnn/6cons) e dependências reproduzíveis pelo
+[PRPM](https://github.com/wanbnn/prpm). O Leaflet 1.9.4 está versionado em
+`inlock/static/vendor`, portanto nenhum JavaScript ou CSS do mapa depende de CDN.
+
+## Instalação rápida — Debian/Ubuntu
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/wanbnn/ntslock/main/install.sh | sudo bash
+```
+
+O instalador requer Python 3.11+, cria um usuário de sistema, ambiente virtual,
+segredos, diretório de dados e serviço `systemd`. Ao terminar, ele exibe o token
+administrativo. Abra `http://IP-DO-SERVIDOR:8080` e informe esse token no painel.
+
+## O que já funciona
+
+- descoberta automática de containers, imagens, estados e portas pelo Docker;
+- projetos por host (`app.exemplo.com`) ou rota (`/p/<slug>`);
+- reverse proxy HTTP com preservação dos cabeçalhos de encaminhamento;
+- rate limit por IP ou global com janela deslizante;
+- whitelist e blacklist com IPv4, IPv6 e CIDR;
+- bloqueio de user-agent com padrões glob (`*bot*`, `curl/*`);
+- limites por país, estado, cidade ou raio desenhado no Leaflet;
+- auditoria de decisões e eventos no SQLite;
+- desafio por QR Code renovado automaticamente a cada 60 segundos;
+- token QR opaco, aleatório e de uso único, sem segredo no cliente;
+- aprovação vinculada ao navegador que exibiu o QR e sessão em cookie
+  `HttpOnly` assinado.
+
+## Como o QR Code evita o acesso direto
+
+```text
+navegador          Inlock                    celular
+    | POST challenge  |                          |
+    |<-- QR opaco ----|                          |
+    |                 |<-- lê e confirma token --|
+    | poll (vinculado)|                          |
+    |<-- cookie HTTPOnly assinado                |
+    |-------- requisição liberada ao upstream -->|
+```
+
+O QR não carrega permissões decodificáveis: contém somente 256 bits aleatórios.
+O servidor armazena o hash desse valor, expira o desafio em 60 segundos,
+invalida o QR anterior na rotação e libera apenas o navegador que iniciou o
+desafio. Copiar uma URL direta do upstream não funciona quando a aplicação está
+exposta somente pela rede Docker e o Inlock é seu único ponto de entrada.
+
+Nenhum QR Code pode provar presença física absoluta: uma transmissão ao vivo ou
+foto do código ainda pode ser lida remotamente dentro dos 60 segundos. Para
+ambientes de alto risco, combine esta confirmação de presença com login, WebAuthn
+ou aprovação em um dispositivo previamente registrado.
+
+## Executar em desenvolvimento
+
+Requer Python 3.11+ e PRPM:
+
+```bash
+python -m pip install prpm
+prpm install
+cp .env.example .env
+prpm run dev
+```
+
+Abra `http://localhost:8080`. Sem `INLOCK_ADMIN_TOKEN`, a API administrativa
+aceita somente conexões loopback. Para acesso remoto, o token é obrigatório; o
+painel o solicita uma vez e o mantém no armazenamento local do navegador.
+
+Os comandos úteis são:
+
+```bash
+prpm run test
+prpm run lint
+prpm run serve
+```
+
+## Instalar com Docker Compose
+
+Gere segredos e informe o GID do socket Docker:
+
+```bash
+cp .env.example .env
+printf '\nDOCKER_GID=%s\n' "$(stat -c '%g' /var/run/docker.sock)" >> .env
+docker compose up -d --build
+```
+
+Adicione ao serviço `inlock` caso o host exija associação explícita ao grupo:
+
+```yaml
+group_add:
+  - "${DOCKER_GID}"
+```
+
+O socket Docker concede poder equivalente a root mesmo montado como somente
+leitura. O Inlock usa apenas `ping` e listagem/inspeção de containers, mas em uma
+instalação endurecida prefira um proxy de socket que permita exclusivamente
+`/_ping`, `/containers/json` e `/containers/*/json`.
+
+## Publicar uma aplicação
+
+1. No painel, abra **Containers** e escolha **Proteger container**.
+2. Confirme a URL upstream. Containers na mesma rede podem usar
+   `http://nome-do-container:porta`; portas publicadas usam `127.0.0.1:porta` em
+   instalação nativa.
+3. Defina um host público, por exemplo `app.exemplo.com`, ou use `/p/meu-app`.
+4. Ative o QR Code e adicione as políticas necessárias.
+5. Aponte seu proxy TLS (Caddy, Traefik ou Nginx) para o Inlock, nunca diretamente
+   para o container protegido.
+
+Exemplo Caddy:
+
+```caddyfile
+inlock.exemplo.com, app.exemplo.com {
+    reverse_proxy 127.0.0.1:8080
+}
+```
+
+Configure `INLOCK_ADMIN_HOST=inlock.exemplo.com` e cadastre
+`app.exemplo.com` como host público do projeto. As rotas `/static`, `/api/gate`
+e `/gate` são reservadas pelo Inlock em hosts protegidos.
+
+## Geolocalização e mapa self-hosted
+
+A avaliação geográfica usa uma base MMDB local compatível com GeoIP2:
+
+```env
+INLOCK_GEOIP_CITY_DB=/data/GeoLite2-City.mmdb
+```
+
+Sem a base, políticas geográficas negam por padrão (`on_unknown=deny`). O painel
+permite optar conscientemente por liberar localização desconhecida. Leaflet é
+servido localmente; os tiles usam OpenStreetMap por padrão. Para operação
+totalmente local, publique seus próprios tiles e ajuste:
+
+```env
+INLOCK_TILE_URL=https://tiles.seudominio/{z}/{x}/{y}.png
+```
+
+## Notas de produção
+
+- Termine TLS antes do Inlock e use `INLOCK_SECURE_COOKIES=true`.
+- Configure somente proxies confiáveis em `INLOCK_TRUSTED_PROXIES`; apenas eles
+  podem fornecer `X-Forwarded-For`.
+- O rate limiter desta versão vive em memória. Execute um worker ou substitua o
+  backend por Redis antes de escalar horizontalmente.
+- WebSocket e streaming de corpos grandes ainda não são encaminhados nesta
+  primeira versão; HTTP convencional funciona normalmente.
+- Mantenha upstreams inacessíveis pela rede pública, ou usuários poderão
+  contornar qualquer reverse proxy conhecendo a porta direta.
+
+## Estrutura
+
+```text
+inlock/
+├── main.py              # API, gateway, QR e reverse proxy
+├── policies.py          # avaliador de políticas
+├── docker_discovery.py  # inspeção read-only do daemon
+├── store.py             # persistência SQLite
+├── security.py          # tokens, IP real e autenticação admin
+├── ui.py                # SSR PyReact/UIKitPR/6cons
+└── static/               # painel, gate e Leaflet local
+```
+
+Licença MIT.
