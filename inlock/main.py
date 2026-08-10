@@ -16,8 +16,9 @@ import qrcode
 import qrcode.image.svg
 import uvicorn
 from fastapi import Depends, FastAPI, Form, HTTPException, Request, Response
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.background import BackgroundTask
 
 from .bot_defense import (
     behavior_score,
@@ -68,7 +69,10 @@ async def lifespan(app: FastAPI):
         settings.docker_url, enabled=settings.enforce_container_isolation
     )
     await asyncio.to_thread(app.state.firewall.reconcile, app.state.store.projects())
-    app.state.http = httpx.AsyncClient(follow_redirects=False, timeout=30)
+    app.state.http = httpx.AsyncClient(
+        follow_redirects=False,
+        timeout=httpx.Timeout(30, read=None),
+    )
 
     async def monitor_containers() -> None:
         while True:
@@ -703,14 +707,19 @@ async def proxy_request(request: Request, project: dict, path: str):
     headers["x-forwarded-for"] = ip
     headers["x-forwarded-proto"] = request.url.scheme
     headers["x-forwarded-host"] = request.headers.get("host", "")
+    upstream_request = request.app.state.http.build_request(
+        request.method, url, headers=headers, content=await request.body(),
+    )
     try:
-        upstream = await request.app.state.http.request(
-            request.method, url, headers=headers, content=await request.body(),
-        )
+        upstream = await request.app.state.http.send(upstream_request, stream=True)
     except httpx.RequestError as exc:
         store(request).audit(project["id"], "proxy", "error", ip, error=type(exc).__name__)
         return JSONResponse({"detail": "Upstream indisponível"}, 502)
-    response = Response(upstream.content, status_code=upstream.status_code)
+    response = StreamingResponse(
+        upstream.aiter_raw(),
+        status_code=upstream.status_code,
+        background=BackgroundTask(upstream.aclose),
+    )
     for key, value in upstream.headers.multi_items():
         if key.lower() not in HOP_BY_HOP:
             response.headers.append(key, value)

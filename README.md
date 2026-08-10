@@ -266,8 +266,9 @@ INLOCK_TILE_URL=https://tiles.seudominio/{z}/{x}/{y}.png
   podem fornecer `X-Forwarded-For`.
 - O rate limiter desta versão vive em memória. Execute um worker ou substitua o
   backend por Redis antes de escalar horizontalmente.
-- WebSocket e streaming de corpos grandes ainda não são encaminhados nesta
-  primeira versão; HTTP convencional funciona normalmente.
+- Respostas HTTP incrementais (SSE, NDJSON e downloads em streaming) são
+  encaminhadas sem buffering e sem timeout de leitura entre chunks. WebSocket
+  ainda não é encaminhado nesta versão.
 - A tomada transparente pressupõe HTTP. Para uma porta HTTPS, termine TLS em
   Caddy/Nginx antes do Inlock, pois o gateway não possui o certificado privado
   do container.

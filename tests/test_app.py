@@ -186,6 +186,44 @@ def test_proxy_after_qr_approval(client):
         response = browser.get("/p/demo/private/dashboard")
         assert response.status_code == 200
         assert response.text == "upstream:/private/dashboard"
+        assert "content-length" not in response.headers
+    finally:
+        browser.portal.call(app.state.http.aclose)
+        app.state.http = old
+
+
+def test_proxy_preserves_streaming_response(client):
+    browser, headers = client
+    create_project(browser, headers, qr=False)
+
+    class ChunkedBody(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            yield b'{"type":"status"}\n'
+            yield b'{"type":"done"}\n'
+
+    async def upstream(request: httpx.Request):
+        assert request.extensions["timeout"]["read"] is None
+        return httpx.Response(
+            200,
+            headers={
+                "content-type": "application/x-ndjson; charset=utf-8",
+                "x-accel-buffering": "no",
+            },
+            stream=ChunkedBody(),
+        )
+
+    old = app.state.http
+    app.state.http = httpx.AsyncClient(
+        transport=httpx.MockTransport(upstream),
+        timeout=httpx.Timeout(30, read=None),
+    )
+    try:
+        response = browser.post("/p/demo/api/ask/stream", content=b"{}")
+        assert response.status_code == 200
+        assert response.content == b'{"type":"status"}\n{"type":"done"}\n'
+        assert response.headers["content-type"] == "application/x-ndjson; charset=utf-8"
+        assert response.headers["x-accel-buffering"] == "no"
+        assert "content-length" not in response.headers
     finally:
         browser.portal.call(app.state.http.aclose)
         app.state.http = old
