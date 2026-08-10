@@ -30,9 +30,13 @@ def test_existing_database_gains_totem_columns(tmp_path):
         probe_table = connection.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name='browser_probes'"
         ).fetchone()
+        location_table = connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='client_locations'"
+        ).fetchone()
     assert "qr_totem_mode" in project_columns
     assert "return_path" in challenge_columns
     assert probe_table
+    assert location_table
 
     store.audit(None, "bot.challenge", "failed", "203.0.113.8")
     store.audit(None, "bot.challenge", "failed", "203.0.113.8")

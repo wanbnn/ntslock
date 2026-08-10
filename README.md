@@ -259,6 +259,27 @@ totalmente local, publique seus próprios tiles e ajuste:
 INLOCK_TILE_URL=https://tiles.seudominio/{z}/{x}/{y}.png
 ```
 
+A área **Relatórios** usa Apache ECharts e o GeoJSON mundial servidos pelo
+próprio Inlock, sem CDN. Para posicionar corretamente o destino no mapa de
+fluxos, configure a localização do servidor:
+
+```env
+INLOCK_SERVER_LATITUDE=-9.6658
+INLOCK_SERVER_LONGITUDE=-35.7353
+INLOCK_SERVER_LOCATION_NAME=Servidor Inlock
+```
+
+O mapa de origens depende da mesma base GeoIP2 local. Logs coletados antes da
+ativação dessa base continuam disponíveis, mas aparecem sem coordenadas.
+
+Para navegadores, o Inlock solicita consentimento de localização na tela do QR
+Code e, em projetos sem QR, antes do primeiro encaminhamento ao upstream. No
+modo totem, a solicitação também acontece no celular que abrirá a aplicação.
+A posição consentida é vinculada ao projeto por um cookie opaco HttpOnly durante
+8 horas (`INLOCK_LOCATION_TTL_SECONDS`) e prevalece sobre a estimativa GeoIP.
+Se o usuário recusar, o acesso continua com rastreabilidade por IP. A API de
+geolocalização dos navegadores exige HTTPS ou localhost.
+
 ## Notas de produção
 
 - Termine TLS antes do Inlock e use `INLOCK_SECURE_COOKIES=true`.

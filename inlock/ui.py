@@ -31,6 +31,7 @@ def dashboard_markup() -> str:
           h("button", {"className": "nav-item active", "data-view": "overview"}, icon("layout-dashboard", size=18), "Visão geral"),
           h("button", {"className": "nav-item", "data-view": "projects"}, icon("boxes", size=18), "Projetos"),
           h("button", {"className": "nav-item", "data-view": "containers"}, icon("container", size=18), "Containers"),
+          h("button", {"className": "nav-item", "data-view": "reports"}, icon("chart-no-axes-combined", size=18), "Relatórios"),
           h("button", {"className": "nav-item", "data-view": "events"}, icon("scroll-text", size=18), "Eventos")),
         h("div", {"className": "sidebar-foot"},
           h("span", {"className": "status-dot"}),
@@ -66,10 +67,12 @@ def dashboard_html(tile_url: str) -> str:
 <meta name="description" content="Inlock — firewall de aplicação para workloads Docker">
 <title>Inlock · Centro de controle</title>
 <link rel="stylesheet" href="/static/vendor/leaflet/leaflet.css">
-<link rel="stylesheet" href="/static/dashboard.css"></head><body>{body}
+<link rel="stylesheet" href="/static/dashboard.css"><link rel="stylesheet" href="/static/reports.css"></head><body>{body}
 <div id="modal-root"></div><div id="toast-root"></div>
 <script type="application/json" id="inlock-config">{config}</script>
 <script src="/static/vendor/leaflet/leaflet.js"></script>
+<script src="/static/vendor/echarts/echarts.min.js"></script>
+<script src="/static/reports.js" defer></script>
 <script src="/static/dashboard.js" defer></script></body></html>"""
 
 
@@ -87,26 +90,42 @@ def gate_html(project: dict, return_path: str = "/") -> str:
     )
     return f"""<!doctype html><html lang="pt-BR"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>Acesso protegido · {html.escape(project['name'])}</title>
-<link rel="stylesheet" href="/static/gate.css"></head><body>
-<main class="gate" data-slug="{html.escape(project['slug'])}" data-mode="{'totem' if totem else 'browser'}" data-return-path="{html.escape(return_path, quote=True)}">
+<link rel="stylesheet" href="/static/gate.css"><link rel="stylesheet" href="/static/location.css"></head><body>
+<main class="gate" data-slug="{html.escape(project['slug'])}" data-location-slug="{html.escape(project['slug'])}" data-mode="{'totem' if totem else 'browser'}" data-return-path="{html.escape(return_path, quote=True)}">
  <section class="gate-copy"><a class="gate-brand" href="#"><span>◆</span> inlock</a>
   <p class="eyebrow">PRESENÇA VERIFICADA</p><h1>Acesso seguro,<br>em um scan.</h1>
   <p class="lead">{lead}</p>
   <div class="trust"><span>✓</span><div><strong>Token efêmero</strong><small>Gerado no servidor e válido por apenas 60 segundos.</small></div></div>
   <div class="trust"><span>✓</span><div><strong>{session_title}</strong><small>{session_copy}</small></div></div>
+  <div class="trust"><span>◎</span><div><strong>Localização com consentimento</strong><small id="location-status">Solicitando permissão para registrar a origem deste acesso…</small></div></div>
  </section>
  <section class="qr-card"><div class="qr-head"><span class="live-dot"></span><span>DESAFIO ATIVO</span><span id="countdown">60s</span></div>
   <div id="qr" class="qr-box"><div class="qr-loader"></div></div>
   <h2>Escaneie para continuar</h2><p id="gate-status">Aguardando leitura pelo celular…</p>
   <div class="timer"><i id="timer-bar"></i></div><small>O código se renova automaticamente a cada 60 segundos.</small>
  </section>
-</main><script src="/static/gate.js" defer></script></body></html>"""
+</main><script src="/static/location.js" defer></script><script src="/static/gate.js" defer></script></body></html>"""
 
 
-def approval_html(token: str, project_name: str, expired: bool = False) -> str:
+def location_consent_html(project: dict) -> str:
+    return f"""<!doctype html><html lang="pt-BR"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>Localização · {html.escape(project['name'])}</title>
+<link rel="stylesheet" href="/static/gate.css"><link rel="stylesheet" href="/static/location.css"></head><body>
+<main class="mobile-confirm" data-location-slug="{html.escape(project['slug'])}" data-location-continue="true">
+ <div class="mobile-mark">◎</div><p class="eyebrow">RASTREABILIDADE DE ACESSO</p>
+ <h1>Confirme sua localização</h1><p>O Inlock solicitará sua permissão para registrar a origem deste acesso antes de encaminhar você para {html.escape(project['name'])}.</p>
+ <p id="location-status" class="location-mobile">Aguardando a permissão do navegador…</p>
+</main><script src="/static/location.js" defer></script></body></html>"""
+
+
+def approval_html(token: str, project: dict | None, expired: bool = False) -> str:
+    project_name = project["name"] if project else "Acesso protegido"
+    project_slug = project["slug"] if project and not expired else ""
     state = "Este código expirou. Volte à tela original e leia o novo QR Code." if expired else "Confirme para liberar exclusivamente o navegador que exibiu este QR Code."
     action = "" if expired else f'<form method="post"><input type="hidden" name="token" value="{html.escape(token)}"><button type="submit">Confirmar acesso</button></form>'
-    return f"""<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Confirmar acesso</title><link rel="stylesheet" href="/static/gate.css"></head><body><main class="mobile-confirm"><div class="mobile-mark">◆</div><p class="eyebrow">INLOCK</p><h1>{html.escape(project_name)}</h1><p>{state}</p>{action}</main></body></html>"""
+    location = "" if expired else '<p id="location-status" class="location-mobile">Solicitando permissão de localização antes de liberar o acesso…</p>'
+    script = "" if expired else '<script src="/static/location.js" defer></script>'
+    return f"""<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Confirmar acesso</title><link rel="stylesheet" href="/static/gate.css"><link rel="stylesheet" href="/static/location.css"></head><body><main class="mobile-confirm" data-location-slug="{html.escape(project_slug)}"><div class="mobile-mark">◆</div><p class="eyebrow">INLOCK</p><h1>{html.escape(project_name)}</h1><p>{state}</p>{location}{action}</main>{script}</body></html>"""
 
 
 def approved_html() -> str:

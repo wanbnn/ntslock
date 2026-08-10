@@ -69,3 +69,9 @@ class PolicyCreate(BaseModel):
     enabled: bool = True
     priority: int = Field(default=100, ge=1, le=10000)
     config: dict[str, Any] = Field(default_factory=dict)
+
+
+class LocationCapture(BaseModel):
+    latitude: float = Field(ge=-90, le=90)
+    longitude: float = Field(ge=-180, le=180)
+    accuracy: float = Field(ge=0, le=100_000)

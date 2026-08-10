@@ -25,6 +25,7 @@ class Settings(BaseSettings):
     browser_probe_ttl_seconds: int = 180
     browser_proof_ttl_seconds: int = 30 * 60
     human_session_ttl_seconds: int = 30 * 60
+    location_ttl_seconds: int = 8 * 60 * 60
     tls_fingerprint_header: str = ""
     trusted_proxies: Annotated[list[str], NoDecode] = ["127.0.0.1/32", "::1/128"]
     geoip_city_db: Path | None = None
@@ -32,6 +33,9 @@ class Settings(BaseSettings):
     enforce_container_isolation: bool = True
     container_reconcile_seconds: int = 10
     tile_url: str = "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+    server_latitude: float = -9.6658
+    server_longitude: float = -35.7353
+    server_location_name: str = "Servidor Inlock"
 
     @field_validator("trusted_proxies", mode="before")
     @classmethod

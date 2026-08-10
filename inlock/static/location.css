@@ -1,0 +1,5 @@
+#location-status[data-state="pending"]{color:#6957e8}
+#location-status[data-state="success"]{color:#22885b}
+#location-status[data-state="error"]{color:#b85b66}
+.location-mobile{margin:-10px 0 18px!important;padding:11px 13px;border:1px solid #e8e7ee;border-radius:10px;background:#f8f7fc;font-size:.72rem!important}
+.mobile-confirm form button:disabled{cursor:wait;opacity:.65}

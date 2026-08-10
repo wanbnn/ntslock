@@ -6,6 +6,7 @@ import io
 import ipaddress
 import sqlite3
 import time
+from collections import Counter, defaultdict
 from contextlib import asynccontextmanager, suppress
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -16,7 +17,12 @@ import qrcode
 import qrcode.image.svg
 import uvicorn
 from fastapi import Depends, FastAPI, Form, HTTPException, Request, Response
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
+from fastapi.responses import (
+    HTMLResponse,
+    JSONResponse,
+    RedirectResponse,
+    StreamingResponse,
+)
 from fastapi.staticfiles import StaticFiles
 from starlette.background import BackgroundTask
 
@@ -31,7 +37,7 @@ from .config import Settings, get_settings
 from .container_firewall import ContainerFirewall
 from .docker_discovery import discover_containers
 from .policies import Decision, PolicyEngine
-from .schemas import PolicyCreate, ProjectCreate, ProjectUpdate
+from .schemas import LocationCapture, PolicyCreate, ProjectCreate, ProjectUpdate
 from .security import (
     browser_hash,
     client_ip,
@@ -51,6 +57,7 @@ from .ui import (
     captcha_html,
     dashboard_html,
     gate_html,
+    location_consent_html,
 )
 
 HOP_BY_HOP = {
@@ -140,7 +147,8 @@ def request_project(request: Request) -> dict | None:
     if project:
         return project
     incoming_port = request.url.port or (443 if request.url.scheme == "https" else 80)
-    slug = request.app.state.firewall.project_slug_for_port(incoming_port)
+    resolver = getattr(request.app.state.firewall, "project_slug_for_port", None)
+    slug = resolver(incoming_port) if resolver else None
     return store(request).project_by_slug(slug) if slug else None
 
 
@@ -414,6 +422,118 @@ async def events(request: Request, limit: int = 50):
     return store(request).events(min(max(limit, 1), 250))
 
 
+SUSPICIOUS_PATH_MARKERS = (
+    "/.env", "/.git", "/wp-admin", "/wp-login", "/phpmyadmin", "/xmlrpc.php",
+    "/actuator", "/server-status", "/cgi-bin", "/vendor/phpunit", "/etc/passwd",
+    "/config.json", "/swagger", "/admin", "../", "%2e%2e", "select%20", "union%20",
+)
+
+
+def _is_suspicious_path(path: str) -> bool:
+    normalized = path.casefold()
+    return any(marker in normalized for marker in SUSPICIOUS_PATH_MARKERS)
+
+
+@app.get("/api/reports", dependencies=[Depends(admin)])
+async def reports(
+    request: Request, hours: int = 24, project_id: int | None = None,
+    query: str = "", outcome: str = "",
+):
+    hours = min(max(hours, 1), 24 * 90)
+    since_dt = datetime.now(UTC) - timedelta(hours=hours)
+    events = store(request).report_events(since_dt.isoformat(), project_id)
+    query_folded = query.strip().casefold()
+    if outcome:
+        events = [event for event in events if event["outcome"] == outcome]
+    if query_folded:
+        events = [
+            event for event in events
+            if query_folded in " ".join((
+                event.get("project_name") or "", event["action"], event["outcome"],
+                event["client_ip"], str(event["detail"].get("path", "")),
+                str(event["detail"].get("user_agent", "")),
+            )).casefold()
+        ]
+
+    requests = [event for event in events if event["action"] in {"request", "proxy"}]
+    blocked = [event for event in events if event["outcome"] in {"denied", "suspected", "failed"}]
+    suspected = [event for event in requests if _is_suspicious_path(str(event["detail"].get("path", "")))]
+    unique_ips = {event["client_ip"] for event in requests if event["client_ip"]}
+    durations = [float(event["detail"].get("duration_ms", 0)) for event in requests if event["detail"].get("duration_ms") is not None]
+
+    bucket_minutes = 60 if hours <= 72 else 24 * 60
+    timeline: dict[str, Counter] = defaultdict(Counter)
+    ip_buckets: dict[tuple[str, str], int] = Counter()
+    endpoint_counts: Counter = Counter()
+    suspicious_counts: Counter = Counter()
+    ip_counts: Counter = Counter()
+    status_counts: Counter = Counter()
+    country_counts: Counter = Counter()
+    flow_counts: Counter = Counter()
+    for event in requests:
+        detail = event["detail"]
+        created = datetime.fromisoformat(event["created_at"])
+        if bucket_minutes == 60:
+            bucket = created.replace(minute=0, second=0, microsecond=0).isoformat()
+        else:
+            bucket = created.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+        timeline[bucket]["blocked" if event["outcome"] != "allowed" else "allowed"] += 1
+        path = str(detail.get("path", "/"))
+        endpoint_counts[(detail.get("method", "—"), path)] += 1
+        if _is_suspicious_path(path):
+            suspicious_counts[path] += 1
+        if event["client_ip"]:
+            ip_counts[event["client_ip"]] += 1
+            minute = created.replace(second=0, microsecond=0).isoformat()
+            ip_buckets[(event["client_ip"], minute)] += 1
+        status_counts[str(detail.get("status", "blocked"))] += 1
+        country = detail.get("country") or "Desconhecido"
+        country_counts[country] += 1
+        if detail.get("latitude") is not None and detail.get("longitude") is not None:
+            flow_counts[(
+                event["client_ip"], float(detail["longitude"]), float(detail["latitude"]),
+                detail.get("city") or country, event.get("project_name") or "Projeto",
+            )] += 1
+
+    peak_rpm = max(ip_buckets.values(), default=0)
+    ddos_ips = Counter()
+    for (ip, _minute), count in ip_buckets.items():
+        if count >= 60:
+            ddos_ips[ip] = max(ddos_ips[ip], count)
+
+    def log_item(event: dict) -> dict:
+        detail = event["detail"]
+        return {
+            "id": event["id"], "created_at": event["created_at"],
+            "project": event.get("project_name") or "Sistema", "action": event["action"],
+            "outcome": event["outcome"], "ip": event["client_ip"],
+            "method": detail.get("method", "—"), "path": detail.get("path", "—"),
+            "status": detail.get("status"), "duration_ms": detail.get("duration_ms"),
+            "country": detail.get("country") or "—", "user_agent": detail.get("user_agent", ""),
+            "reason": detail.get("reason", ""),
+        }
+
+    return {
+        "range": {"hours": hours, "since": since_dt.isoformat(), "total_events": len(events)},
+        "kpis": {
+            "requests": len(requests), "blocked": len(blocked), "unique_ips": len(unique_ips),
+            "suspicious": len(suspected), "avg_latency_ms": round(sum(durations) / len(durations), 1) if durations else 0,
+            "peak_rpm": peak_rpm, "ddos_sources": len(ddos_ips),
+        },
+        "timeline": [{"time": key, **timeline[key]} for key in sorted(timeline)],
+        "outcomes": dict(Counter(event["outcome"] for event in events)),
+        "statuses": dict(status_counts),
+        "top_endpoints": [{"method": key[0], "path": key[1], "count": count} for key, count in endpoint_counts.most_common(10)],
+        "suspicious_endpoints": [{"path": path, "count": count} for path, count in suspicious_counts.most_common(10)],
+        "top_ips": [{"ip": ip, "count": count, "peak_rpm": ddos_ips.get(ip, 0)} for ip, count in ip_counts.most_common(10)],
+        "countries": [{"name": name, "value": count} for name, count in country_counts.most_common()],
+        "flows": [{"ip": key[0], "coords": [key[1], key[2]], "location": key[3], "project": key[4], "count": count} for key, count in flow_counts.most_common(250)],
+        "server": {"name": settings(request).server_location_name, "coords": [settings(request).server_longitude, settings(request).server_latitude]},
+        "ddos": [{"ip": ip, "peak_rpm": rpm} for ip, rpm in ddos_ips.most_common(10)],
+        "logs": [log_item(event) for event in events[:500]],
+    }
+
+
 @app.post("/gate/probe/verify", include_in_schema=False)
 async def verify_browser_probe(
     request: Request, probe_id: str = Form(...), telemetry: str = Form("{}")
@@ -573,6 +693,53 @@ async def create_challenge(slug: str, request: Request):
     return response
 
 
+@app.post("/api/gate/{slug}/location", include_in_schema=False)
+async def capture_client_location(
+    slug: str, payload: LocationCapture, request: Request
+):
+    project = store(request).project_by_slug(slug)
+    if not project or not project["enabled"]:
+        raise HTTPException(404, "Projeto não encontrado ou desativado")
+    config = settings(request)
+    cookie_name = f"inlock_location_{project['id']}"
+    location_token = request.cookies.get(cookie_name) or random_token(32)
+    expires_at = int(time.time()) + config.location_ttl_seconds
+    store(request).save_client_location(
+        token_hash(location_token), project["id"], payload.latitude,
+        payload.longitude, payload.accuracy, expires_at,
+    )
+    store(request).audit(
+        project["id"], "location.captured", "success",
+        client_ip(request, config.trusted_proxies), latitude=payload.latitude,
+        longitude=payload.longitude, accuracy=payload.accuracy, source="browser",
+    )
+    response = JSONResponse({"captured": True, "accuracy": payload.accuracy})
+    response.set_cookie(
+        cookie_name, location_token, max_age=config.location_ttl_seconds,
+        httponly=True, secure=config.secure_cookies, samesite="lax", path="/",
+    )
+    return response
+
+
+@app.post("/api/gate/{slug}/location-declined", include_in_schema=False)
+async def decline_client_location(slug: str, request: Request):
+    project = store(request).project_by_slug(slug)
+    if not project or not project["enabled"]:
+        raise HTTPException(404, "Projeto não encontrado ou desativado")
+    config = settings(request)
+    store(request).audit(
+        project["id"], "location.permission", "denied",
+        client_ip(request, config.trusted_proxies), source="browser",
+    )
+    response = JSONResponse({"captured": False})
+    response.set_cookie(
+        f"inlock_location_attempt_{project['id']}", "denied",
+        max_age=config.location_ttl_seconds, httponly=True,
+        secure=config.secure_cookies, samesite="lax", path="/",
+    )
+    return response
+
+
 @app.get("/gate/qr/{opaque_token}.svg", name="gate_qr", include_in_schema=False)
 async def gate_qr(opaque_token: str, request: Request):
     challenge = store(request).challenge_by_token_hash(token_hash(opaque_token))
@@ -589,13 +756,13 @@ async def gate_qr(opaque_token: str, request: Request):
 async def approve_gate(request: Request, token: str):
     challenge = store(request).challenge_by_token_hash(token_hash(token))
     if not challenge:
-        return HTMLResponse(approval_html(token, "Acesso protegido", True), 410)
+        return HTMLResponse(approval_html(token, None, True), 410)
     project = store(request).project(challenge["project_id"])
     expired = challenge["state"] != "pending" or challenge["expires_at"] < int(time.time())
     if project and project["qr_totem_mode"] and not expired:
         now = int(time.time())
         if not store(request).approve_challenge(challenge["id"], now, "mobile_opened"):
-            return HTMLResponse(approval_html(token, project["name"], True), 410)
+            return HTMLResponse(approval_html(token, project, True), 410)
         config = settings(request)
         response = RedirectResponse(challenge.get("return_path") or "/", status_code=303)
         response.set_cookie(
@@ -607,7 +774,7 @@ async def approve_gate(request: Request, token: str):
         ip = client_ip(request, config.trusted_proxies)
         store(request).audit(project["id"], "qr.mobile_opened", "success", ip)
         return response
-    return HTMLResponse(approval_html(token, project["name"] if project else "Acesso protegido", expired), 410 if expired else 200)
+    return HTMLResponse(approval_html(token, project, expired), 410 if expired else 200)
 
 
 @app.post("/gate/approve", response_class=HTMLResponse, include_in_schema=False)
@@ -615,7 +782,7 @@ async def confirm_gate(request: Request, token: str = Form(...)):
     now = int(time.time())
     challenge = store(request).challenge_by_token_hash(token_hash(token))
     if not challenge or not store(request).approve_challenge(challenge["id"], now):
-        return HTMLResponse(approval_html(token, "Acesso protegido", True), 410)
+        return HTMLResponse(approval_html(token, None, True), 410)
     ip = client_ip(request, settings(request).trusted_proxies)
     store(request).audit(challenge["project_id"], "qr.approved", "success", ip)
     return HTMLResponse(approved_html())
@@ -653,8 +820,35 @@ async def proxy_by_slug(slug: str, request: Request, path: str = ""):
 
 
 async def proxy_request(request: Request, project: dict, path: str):
+    started_at = time.perf_counter()
     config = settings(request)
     ip = client_ip(request, config.trusted_proxies)
+    location_cookie = request.cookies.get(f"inlock_location_{project['id']}", "")
+    browser_location = (
+        store(request).client_location(
+            token_hash(location_cookie), project["id"], int(time.time())
+        ) if location_cookie else None
+    )
+    location = request.app.state.engine.geo.locate(ip) or {}
+    if browser_location:
+        location = {
+            **location, "latitude": browser_location["latitude"],
+            "longitude": browser_location["longitude"],
+            "accuracy": browser_location["accuracy"], "source": "browser",
+        }
+    request_detail = {
+        "method": request.method,
+        "path": request.url.path,
+        "user_agent": request.headers.get("user-agent", "")[:500],
+        "referer": request.headers.get("referer", "")[:500],
+        "country": location.get("country", ""),
+        "state": location.get("state", ""),
+        "city": location.get("city", ""),
+        "latitude": location.get("latitude"),
+        "longitude": location.get("longitude"),
+        "location_accuracy": location.get("accuracy"),
+        "location_source": location.get("source", "geoip" if location else "unknown"),
+    }
     policies = store(request).policies(project["id"])
     human_access = request.cookies.get(f"inlock_human_{project['id']}", "")
     human_verified = verify_access(human_access, project["id"], config.secret_key)
@@ -710,8 +904,11 @@ async def proxy_request(request: Request, project: dict, path: str):
                 request, project, request_return_path(request), decision.bot_score or 0
             )
         store(request).audit(
-            project["id"], "request", "denied", ip, reason=decision.reason,
-            policy_id=decision.policy_id, bot_score=decision.bot_score,
+            project["id"], "request", "denied", ip, **request_detail,
+            reason=decision.reason, policy_id=decision.policy_id,
+            bot_score=decision.bot_score,
+            status=429 if decision.reason == "rate_limited" else 403,
+            duration_ms=round((time.perf_counter() - started_at) * 1000, 2),
         )
         headers = {"Retry-After": str(decision.retry_after)} if decision.retry_after else None
         return JSONResponse({"detail": "Acesso negado", "reason": decision.reason}, 429 if decision.reason == "rate_limited" else 403, headers=headers)
@@ -722,8 +919,22 @@ async def proxy_request(request: Request, project: dict, path: str):
             if request.url.query:
                 return_path += f"?{request.url.query}"
             return HTMLResponse(
-                gate_html(project, return_path), headers={"Cache-Control": "no-store"}
+                gate_html(project, return_path),
+                headers={
+                    "Cache-Control": "no-store",
+                    "Permissions-Policy": "geolocation=(self)",
+                },
             )
+    elif (
+        not browser_location
+        and not request.cookies.get(f"inlock_location_attempt_{project['id']}")
+        and request.method == "GET"
+        and "text/html" in request.headers.get("accept", "")
+    ):
+        return HTMLResponse(
+            location_consent_html(project),
+            headers={"Cache-Control": "no-store", "Permissions-Policy": "geolocation=(self)"},
+        )
     query = f"?{request.url.query}" if request.url.query else ""
     url = f"{project['upstream_url']}/{path}{query}"
     headers = {key: value for key, value in request.headers.items() if key.lower() not in HOP_BY_HOP and key.lower() != "cookie"}
@@ -739,17 +950,28 @@ async def proxy_request(request: Request, project: dict, path: str):
     try:
         upstream = await request.app.state.http.send(upstream_request, stream=True)
     except httpx.RequestError as exc:
-        store(request).audit(project["id"], "proxy", "error", ip, error=type(exc).__name__)
+        store(request).audit(
+            project["id"], "proxy", "error", ip, **request_detail,
+            error=type(exc).__name__, status=502,
+            duration_ms=round((time.perf_counter() - started_at) * 1000, 2),
+        )
         return JSONResponse({"detail": "Upstream indisponível"}, 502)
+    body = iter([upstream.content]) if upstream.is_stream_consumed else upstream.aiter_raw()
     response = StreamingResponse(
-        upstream.aiter_raw(),
+        body,
         status_code=upstream.status_code,
         background=BackgroundTask(upstream.aclose),
     )
     for key, value in upstream.headers.multi_items():
         if key.lower() not in HOP_BY_HOP:
             response.headers.append(key, value)
-    store(request).audit(project["id"], "request", "allowed", ip, status=upstream.status_code)
+    store(request).audit(
+        project["id"], "request", "allowed", ip, **request_detail,
+        status=upstream.status_code,
+        duration_ms=round((time.perf_counter() - started_at) * 1000, 2),
+        response_bytes=int(upstream.headers.get("content-length", 0) or 0),
+        content_type=upstream.headers.get("content-type", "")[:200],
+    )
     return response
 
 

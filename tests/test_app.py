@@ -10,6 +10,7 @@ import inlock.main as main_module
 from inlock.config import Settings
 from inlock.main import app
 from inlock.policies import PolicyEngine
+from inlock.security import token_hash
 from inlock.store import Store
 
 
@@ -54,6 +55,65 @@ def test_project_and_policy_crud(client):
         "type": "ip_blocklist", "name": "Inválida", "config": {"networks": ["not-an-ip"]},
     })
     assert invalid.status_code == 422
+
+
+def test_security_report_aggregates_requests_and_suspicious_paths(client):
+    browser, headers = client
+    project = create_project(browser, headers, qr=False)
+    common = {
+        "method": "GET", "user_agent": "security-scanner", "country": "BR",
+        "city": "Maceió", "latitude": -9.66, "longitude": -35.73,
+    }
+    app.state.store.audit(
+        project["id"], "request", "allowed", "198.51.100.10",
+        **common, path="/health", status=200, duration_ms=12.5,
+    )
+    app.state.store.audit(
+        project["id"], "request", "denied", "198.51.100.20",
+        **common, path="/.env", status=403, duration_ms=1.2, reason="ip_blocked",
+    )
+
+    response = browser.get(
+        f"/api/reports?hours=24&project_id={project['id']}", headers=headers
+    )
+    assert response.status_code == 200
+    report = response.json()
+    assert report["kpis"]["requests"] == 2
+    assert report["kpis"]["blocked"] == 1
+    assert report["kpis"]["suspicious"] == 1
+    assert report["suspicious_endpoints"] == [{"path": "/.env", "count": 1}]
+    assert report["flows"][0]["coords"] == [-35.73, -9.66]
+
+
+def test_browser_location_is_saved_in_an_opaque_project_cookie(client):
+    browser, headers = client
+    project = create_project(browser, headers, qr=False)
+    response = browser.post(
+        "/api/gate/demo/location",
+        json={"latitude": -9.6658, "longitude": -35.7353, "accuracy": 18.4},
+    )
+    assert response.status_code == 200
+    cookie_name = f"inlock_location_{project['id']}"
+    opaque_token = browser.cookies[cookie_name]
+    assert "httponly" in response.headers["set-cookie"].lower()
+    saved = app.state.store.client_location(
+        token_hash(opaque_token), project["id"], 0
+    )
+    assert saved["latitude"] == -9.6658
+    assert saved["longitude"] == -35.7353
+    assert saved["accuracy"] == 18.4
+
+
+def test_browser_navigation_gets_location_gate_before_unprotected_upstream(client):
+    browser, headers = client
+    create_project(browser, headers, qr=False)
+    response = browser.get(
+        "/p/demo/private", headers={"accept": "text/html,application/xhtml+xml"}
+    )
+    assert response.status_code == 200
+    assert "Confirme sua localização" in response.text
+    assert 'data-location-slug="demo"' in response.text
+    assert response.headers["permissions-policy"] == "geolocation=(self)"
 
 
 def test_container_project_is_rejected_when_direct_port_cannot_be_isolated(client):
@@ -356,6 +416,13 @@ def test_bot_score_progressive_javascript_probe_allows_browser_like_session(clie
     try:
         released = browser.get("/p/demo/welcome", headers=browser_headers)
         assert released.status_code == 200
+        assert "Confirme sua localização" in released.text
+        location = browser.post(
+            "/api/gate/demo/location",
+            json={"latitude": -9.66, "longitude": -35.73, "accuracy": 20},
+        )
+        assert location.status_code == 200
+        released = browser.get("/p/demo/welcome", headers=browser_headers)
         assert released.text == "browser verified"
     finally:
         browser.portal.call(app.state.http.aclose)

@@ -79,6 +79,16 @@ CREATE TABLE IF NOT EXISTS audit_events (
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_events(created_at DESC);
+CREATE TABLE IF NOT EXISTS client_locations (
+    token_hash TEXT PRIMARY KEY,
+    project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    latitude REAL NOT NULL,
+    longitude REAL NOT NULL,
+    accuracy REAL NOT NULL,
+    expires_at INTEGER NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_location_expiry ON client_locations(expires_at);
 """
 
 
@@ -361,6 +371,33 @@ class Store:
                 (project_id, action, outcome, client_ip, json.dumps(detail), utcnow()),
             )
 
+    def save_client_location(
+        self, token_hash: str, project_id: int, latitude: float,
+        longitude: float, accuracy: float, expires_at: int,
+    ) -> None:
+        with self._lock, self.connect() as db:
+            db.execute("DELETE FROM client_locations WHERE expires_at<?", (int(datetime.now(UTC).timestamp()),))
+            db.execute(
+                """INSERT INTO client_locations
+                (token_hash,project_id,latitude,longitude,accuracy,expires_at,created_at)
+                VALUES(?,?,?,?,?,?,?) ON CONFLICT(token_hash) DO UPDATE SET
+                latitude=excluded.latitude,longitude=excluded.longitude,
+                accuracy=excluded.accuracy,expires_at=excluded.expires_at,
+                created_at=excluded.created_at""",
+                (token_hash, project_id, latitude, longitude, accuracy, expires_at, utcnow()),
+            )
+
+    def client_location(
+        self, token_hash: str, project_id: int, now: int
+    ) -> dict[str, Any] | None:
+        with self.connect() as db:
+            row = db.execute(
+                """SELECT latitude,longitude,accuracy,created_at FROM client_locations
+                WHERE token_hash=? AND project_id=? AND expires_at>=?""",
+                (token_hash, project_id, now),
+            ).fetchone()
+            return dict(row) if row else None
+
     def events(self, limit: int = 50) -> list[dict[str, Any]]:
         with self.connect() as db:
             rows = db.execute(
@@ -373,3 +410,27 @@ class Store:
                 item["detail"] = json.loads(item["detail"])
                 result.append(item)
             return result
+
+    def report_events(
+        self, since: str, project_id: int | None = None, limit: int = 10000
+    ) -> list[dict[str, Any]]:
+        """Return request/security events used by the local analytics API."""
+        where = ["e.created_at>=?"]
+        values: list[Any] = [since]
+        if project_id is not None:
+            where.append("e.project_id=?")
+            values.append(project_id)
+        values.append(limit)
+        with self.connect() as db:
+            rows = db.execute(
+                f"""SELECT e.*,p.name AS project_name,p.slug AS project_slug
+                FROM audit_events e LEFT JOIN projects p ON p.id=e.project_id
+                WHERE {' AND '.join(where)} ORDER BY e.id DESC LIMIT ?""",
+                values,
+            ).fetchall()
+        result = []
+        for row in rows:
+            item = dict(row)
+            item["detail"] = json.loads(item["detail"])
+            result.append(item)
+        return result
