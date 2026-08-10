@@ -284,7 +284,10 @@ geolocalização dos navegadores exige HTTPS ou localhost.
 
 - Termine TLS antes do Inlock e use `INLOCK_SECURE_COOKIES=true`.
 - Configure somente proxies confiáveis em `INLOCK_TRUSTED_PROXIES`; apenas eles
-  podem fornecer `X-Forwarded-For`.
+  podem fornecer `CF-Connecting-IP` ou `X-Forwarded-For`. Com `cloudflared` no
+  mesmo host, inclua `127.0.0.1/32,::1/128`; em Docker, inclua também apenas a
+  rede usada pelo container do tunnel. O Inlock prioriza `CF-Connecting-IP`,
+  que o Cloudflare envia com o IP original do visitante.
 - O rate limiter desta versão vive em memória. Execute um worker ou substitua o
   backend por Redis antes de escalar horizontalmente.
 - Respostas HTTP incrementais (SSE, NDJSON e downloads em streaming) são

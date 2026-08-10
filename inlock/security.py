@@ -95,11 +95,16 @@ def client_ip(request: Request, trusted_networks: Iterable[str]) -> str:
     except ValueError:
         trusted = False
     if trusted:
-        forwarded = request.headers.get("x-forwarded-for", "").split(",")[0].strip()
-        try:
-            return str(ipaddress.ip_address(forwarded)) if forwarded else peer
-        except ValueError:
-            pass
+        candidates = (
+            request.headers.get("cf-connecting-ip", "").strip(),
+            request.headers.get("x-forwarded-for", "").split(",")[0].strip(),
+        )
+        for forwarded in candidates:
+            try:
+                if forwarded:
+                    return str(ipaddress.ip_address(forwarded))
+            except ValueError:
+                continue
     return peer
 
 

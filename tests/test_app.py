@@ -217,7 +217,14 @@ def test_totem_mode_opens_app_on_mobile_without_releasing_original_browser(clien
     assert challenge["mode"] == "totem"
     token = challenge["qr_url"].split("/")[-1].removesuffix(".svg")
 
-    opened = browser.get("/gate/approve", params={"token": token}, follow_redirects=False)
+    approval = browser.get("/gate/approve", params={"token": token}, follow_redirects=False)
+    assert approval.status_code == 200
+    assert "Compartilhe sua localização" in approval.text
+    assert 'data-location-slug="totem"' in approval.text
+    assert browser.post("/api/gate/totem/location", json={
+        "latitude": -9.6658, "longitude": -35.7353, "accuracy": 12,
+    }).status_code == 200
+    opened = browser.post("/gate/approve", data={"token": token}, follow_redirects=False)
     assert opened.status_code == 303
     assert opened.headers["location"] == "/p/totem/mobile/welcome?campaign=qr"
     access_cookie = f"inlock_access_{project['id']}"

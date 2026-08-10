@@ -759,32 +759,35 @@ async def approve_gate(request: Request, token: str):
         return HTMLResponse(approval_html(token, None, True), 410)
     project = store(request).project(challenge["project_id"])
     expired = challenge["state"] != "pending" or challenge["expires_at"] < int(time.time())
-    if project and project["qr_totem_mode"] and not expired:
-        now = int(time.time())
-        if not store(request).approve_challenge(challenge["id"], now, "mobile_opened"):
-            return HTMLResponse(approval_html(token, project, True), 410)
-        config = settings(request)
-        response = RedirectResponse(challenge.get("return_path") or "/", status_code=303)
-        response.set_cookie(
-            f"inlock_access_{project['id']}",
-            sign_access(project["id"], config.secret_key, config.access_ttl_seconds),
-            max_age=config.access_ttl_seconds, httponly=True, secure=config.secure_cookies,
-            samesite="lax", path="/",
-        )
-        ip = client_ip(request, config.trusted_proxies)
-        store(request).audit(project["id"], "qr.mobile_opened", "success", ip)
-        return response
-    return HTMLResponse(approval_html(token, project, expired), 410 if expired else 200)
+    return HTMLResponse(
+        approval_html(token, project, expired), 410 if expired else 200,
+        headers={"Cache-Control": "no-store", "Permissions-Policy": "geolocation=(self)"},
+    )
 
 
 @app.post("/gate/approve", response_class=HTMLResponse, include_in_schema=False)
 async def confirm_gate(request: Request, token: str = Form(...)):
     now = int(time.time())
     challenge = store(request).challenge_by_token_hash(token_hash(token))
-    if not challenge or not store(request).approve_challenge(challenge["id"], now):
+    project = store(request).project(challenge["project_id"]) if challenge else None
+    state = "mobile_opened" if project and project["qr_totem_mode"] else "approved"
+    if not challenge or not project or not store(request).approve_challenge(
+        challenge["id"], now, state
+    ):
         return HTMLResponse(approval_html(token, None, True), 410)
-    ip = client_ip(request, settings(request).trusted_proxies)
-    store(request).audit(challenge["project_id"], "qr.approved", "success", ip)
+    config = settings(request)
+    ip = client_ip(request, config.trusted_proxies)
+    if project["qr_totem_mode"]:
+        response = RedirectResponse(challenge.get("return_path") or "/", status_code=303)
+        response.set_cookie(
+            f"inlock_access_{project['id']}",
+            sign_access(project["id"], config.secret_key, config.access_ttl_seconds),
+            max_age=config.access_ttl_seconds, httponly=True,
+            secure=config.secure_cookies, samesite="lax", path="/",
+        )
+        store(request).audit(project["id"], "qr.mobile_opened", "success", ip)
+        return response
+    store(request).audit(project["id"], "qr.approved", "success", ip)
     return HTMLResponse(approved_html())
 
 

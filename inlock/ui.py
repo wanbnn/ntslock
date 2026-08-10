@@ -121,8 +121,10 @@ def location_consent_html(project: dict) -> str:
 def approval_html(token: str, project: dict | None, expired: bool = False) -> str:
     project_name = project["name"] if project else "Acesso protegido"
     project_slug = project["slug"] if project and not expired else ""
-    state = "Este código expirou. Volte à tela original e leia o novo QR Code." if expired else "Confirme para liberar exclusivamente o navegador que exibiu este QR Code."
-    action = "" if expired else f'<form method="post"><input type="hidden" name="token" value="{html.escape(token)}"><button type="submit">Confirmar acesso</button></form>'
+    totem = bool(project and project.get("qr_totem_mode"))
+    state = "Este código expirou. Volte à tela original e leia o novo QR Code." if expired else ("Compartilhe sua localização e confirme para abrir a aplicação neste dispositivo." if totem else "Confirme para liberar exclusivamente o navegador que exibiu este QR Code.")
+    button_label = "Abrir aplicação neste dispositivo" if totem else "Confirmar acesso"
+    action = "" if expired else f'<form method="post"><input type="hidden" name="token" value="{html.escape(token)}"><button type="submit">{button_label}</button></form>'
     location = "" if expired else '<p id="location-status" class="location-mobile">Solicitando permissão de localização antes de liberar o acesso…</p>'
     script = "" if expired else '<script src="/static/location.js" defer></script>'
     return f"""<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Confirmar acesso</title><link rel="stylesheet" href="/static/gate.css"><link rel="stylesheet" href="/static/location.css"></head><body><main class="mobile-confirm" data-location-slug="{html.escape(project_slug)}"><div class="mobile-mark">◆</div><p class="eyebrow">INLOCK</p><h1>{html.escape(project_name)}</h1><p>{state}</p>{location}{action}</main>{script}</body></html>"""
