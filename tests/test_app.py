@@ -229,6 +229,36 @@ def test_proxy_preserves_streaming_response(client):
         app.state.http = old
 
 
+def test_public_host_proxies_path_that_collides_with_admin_api(client):
+    browser, headers = client
+    created = browser.post("/api/projects", headers=headers, json={
+        "name": "Journey", "slug": "journey",
+        "upstream_url": "http://journey.internal:4397",
+        "public_host": "journey.example",
+        "qr_required": False,
+    })
+    assert created.status_code == 201
+
+    async def upstream(request: httpx.Request):
+        assert request.url == "http://journey.internal:4397/api/projects"
+        assert request.method == "POST"
+        assert json.loads(request.content) == {"name": "Projeto do Estudio"}
+        return httpx.Response(201, json={"id": 42, "name": "Projeto do Estudio"})
+
+    old = app.state.http
+    app.state.http = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+    try:
+        response = browser.post(
+            "http://journey.example/api/projects",
+            json={"name": "Projeto do Estudio"},
+        )
+        assert response.status_code == 201
+        assert response.json() == {"id": 42, "name": "Projeto do Estudio"}
+    finally:
+        browser.portal.call(app.state.http.aclose)
+        app.state.http = old
+
+
 def test_bot_score_visual_challenge_releases_only_the_verified_browser(client):
     browser, headers = client
     project = create_project(browser, headers, qr=False)

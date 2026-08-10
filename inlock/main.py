@@ -57,6 +57,7 @@ HOP_BY_HOP = {
     "connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te",
     "trailers", "transfer-encoding", "upgrade", "host", "content-length",
 }
+PUBLIC_GATEWAY_PATHS = ("/static", "/api/gate", "/gate")
 
 
 @asynccontextmanager
@@ -94,6 +95,31 @@ app = FastAPI(
     lifespan=lifespan,
 )
 app.mount("/static", StaticFiles(directory=Path(__file__).parent / "static"), name="static")
+
+
+def _is_public_gateway_path(path: str) -> bool:
+    return any(path == prefix or path.startswith(f"{prefix}/") for prefix in PUBLIC_GATEWAY_PATHS)
+
+
+@app.middleware("http")
+async def proxy_public_host(request: Request, call_next):
+    """Prioriza o upstream em hosts públicos antes das rotas administrativas.
+
+    FastAPI resolve rotas explícitas como /api/projects antes do catch-all no
+    fim deste módulo. Sem esta decisão por host, APIs homônimas da aplicação
+    protegida acabam tratadas pelo painel administrativo do Inlock.
+    """
+    project = request_project(request)
+    config = settings(request)
+    host = (request.url.hostname or "").lower()
+    admin_host = config.admin_host.strip().lower()
+    if (
+        project
+        and (not admin_host or host != admin_host)
+        and not _is_public_gateway_path(request.url.path)
+    ):
+        return await proxy_request(request, project, request.url.path.lstrip("/"))
+    return await call_next(request)
 
 
 def store(request: Request) -> Store:
