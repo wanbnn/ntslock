@@ -59,7 +59,8 @@ class ProjectUpdate(BaseModel):
 
 
 PolicyType = Literal[
-    "rate_limit", "geo", "user_agent", "ip_allowlist", "ip_blocklist", "bot_score"
+    "rate_limit", "geo", "user_agent", "ip_allowlist", "ip_blocklist", "bot_score",
+    "proprietary_login",
 ]
 
 

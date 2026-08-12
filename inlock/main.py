@@ -4,13 +4,15 @@ import asyncio
 import hmac
 import io
 import ipaddress
+import re
 import sqlite3
 import time
 from collections import Counter, defaultdict
 from contextlib import asynccontextmanager, suppress
 from datetime import UTC, datetime, timedelta
+from http.cookies import SimpleCookie
 from pathlib import Path
-from urllib.parse import quote
+from urllib.parse import quote, unquote, urljoin, urlparse
 
 import httpx
 import qrcode
@@ -64,7 +66,7 @@ HOP_BY_HOP = {
     "connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te",
     "trailers", "transfer-encoding", "upgrade", "host", "content-length",
 }
-PUBLIC_GATEWAY_PATHS = ("/static", "/api/gate", "/gate")
+PUBLIC_GATEWAY_PATHS = ("/static", "/api/gate", "/gate", "/auth")
 
 
 @asynccontextmanager
@@ -73,6 +75,7 @@ async def lifespan(app: FastAPI):
     app.state.settings = settings
     app.state.store = Store(settings.database_path)
     app.state.engine = PolicyEngine(settings.geoip_city_db)
+    app.state.proprietary_login_sessions = {}
     app.state.firewall = ContainerFirewall(
         settings.docker_url, enabled=settings.enforce_container_isolation
     )
@@ -279,6 +282,22 @@ def _validate_policy(payload: PolicyCreate) -> None:
             raise HTTPException(422, "threshold deve ser um número entre 0 e 100") from None
         if not 0 <= threshold <= 100:
             raise HTTPException(422, "threshold deve estar entre 0 e 100")
+    if payload.type == "proprietary_login":
+        login_url = str(config.get("login_url", ""))
+        success_url = str(config.get("success_url", ""))
+        login = urlparse(login_url)
+        success = urlparse(success_url)
+        if (
+            login.scheme not in {"http", "https"} or not login.hostname
+            or success.scheme not in {"http", "https"} or not success.hostname
+        ):
+            raise HTTPException(422, "login_url e success_url devem ser URLs HTTP(S)")
+        if (login.scheme, login.hostname, login.port) != (
+            success.scheme, success.hostname, success.port
+        ):
+            raise HTTPException(422, "login e sucesso devem pertencer à mesma origem")
+        if login.username or login.password or success.username or success.password:
+            raise HTTPException(422, "URLs de autenticação não podem conter credenciais")
 
 
 @app.get("/health", include_in_schema=False)
@@ -420,6 +439,156 @@ async def containers(request: Request):
 @app.get("/api/events", dependencies=[Depends(admin)])
 async def events(request: Request, limit: int = 50):
     return store(request).events(min(max(limit, 1), 250))
+
+
+def _same_origin(first: str, second: str) -> bool:
+    left, right = urlparse(first), urlparse(second)
+    return (left.scheme, left.hostname, left.port) == (
+        right.scheme, right.hostname, right.port
+    )
+
+
+def _auth_proxy_url(session_id: str, target: str) -> str:
+    return f"/auth/proprietary/{session_id}?url={quote(target, safe='')}"
+
+
+def _matches_auth_success(target: str, success_url: str) -> bool:
+    current, success = urlparse(target), urlparse(success_url)
+    if not _same_origin(target, success_url):
+        return False
+    success_path = success.path.rstrip("/") or "/"
+    return (
+        current.path == success_path
+        or (success_path != "/" and current.path.startswith(f"{success_path}/"))
+    )
+
+
+def _rewrite_login_html(content: str, base_url: str, session_id: str) -> str:
+    def replace_attribute(match: re.Match) -> str:
+        name, quote_char, value = match.group(1), match.group(2), match.group(3)
+        if value.startswith(("#", "data:", "javascript:", "mailto:", "tel:")):
+            return match.group(0)
+        target = urljoin(base_url, value)
+        if not _same_origin(base_url, target):
+            return f'{name}={quote_char}#{quote_char}'
+        return f"{name}={quote_char}{_auth_proxy_url(session_id, target)}{quote_char}"
+
+    content = re.sub(
+        r"\b(href|src|action)=([\"'])(.*?)(?:\2)", replace_attribute,
+        content, flags=re.IGNORECASE,
+    )
+
+    def replace_css(match: re.Match) -> str:
+        raw = match.group(1).strip(" \t\"'")
+        if raw.startswith(("data:", "#")):
+            return match.group(0)
+        target = urljoin(base_url, raw)
+        if not _same_origin(base_url, target):
+            return "url('')"
+        return f"url('{_auth_proxy_url(session_id, target)}')"
+
+    return re.sub(r"url\(([^)]+)\)", replace_css, content, flags=re.IGNORECASE)
+
+
+def _auth_session(request: Request, session_id: str) -> dict:
+    session = request.app.state.proprietary_login_sessions.get(session_id)
+    browser_secret = request.cookies.get("inlock_proprietary_browser", "")
+    if (
+        not session or session["expires_at"] < int(time.time()) or not browser_secret
+        or not hmac.compare_digest(
+            session["browser_hash"],
+            browser_hash(browser_secret, settings(request).secret_key),
+        )
+    ):
+        raise HTTPException(410, "Sessão de autenticação expirada")
+    return session
+
+
+def _complete_proprietary_login(
+    request: Request, session_id: str, session: dict
+) -> RedirectResponse:
+    project = store(request).project(session["project_id"])
+    if not project:
+        raise HTTPException(404, "Projeto não encontrado")
+    request.app.state.proprietary_login_sessions.pop(session_id, None)
+    config = settings(request)
+    response = RedirectResponse(session["return_path"], status_code=303)
+    response.set_cookie(
+        f"inlock_proprietary_{project['id']}",
+        sign_access(project["id"], config.secret_key, config.access_ttl_seconds),
+        max_age=config.access_ttl_seconds, httponly=True,
+        secure=config.secure_cookies, samesite="lax", path="/",
+    )
+    store(request).audit(
+        project["id"], "proprietary_login", "success",
+        client_ip(request, config.trusted_proxies),
+    )
+    return response
+
+
+@app.api_route(
+    "/auth/proprietary/{session_id}",
+    methods=["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    include_in_schema=False,
+)
+async def proprietary_login_proxy(session_id: str, request: Request):
+    session = _auth_session(request, session_id)
+    target = unquote(request.query_params.get("url", ""))
+    if not target or not _same_origin(session["login_url"], target):
+        raise HTTPException(403, "Destino fora da origem de autenticação autorizada")
+    if _matches_auth_success(target, session["success_url"]):
+        return _complete_proprietary_login(request, session_id, session)
+
+    headers = {
+        key: value for key, value in request.headers.items()
+        if key.lower() not in HOP_BY_HOP
+        and key.lower() not in {"cookie", "authorization", "origin", "referer"}
+    }
+    if session["cookies"]:
+        headers["cookie"] = "; ".join(
+            f"{key}={value}" for key, value in session["cookies"].items()
+        )
+    parsed = urlparse(target)
+    origin = f"{parsed.scheme}://{parsed.netloc}"
+    if request.method not in {"GET", "HEAD"}:
+        headers["origin"] = origin
+    headers["referer"] = session.get("last_url") or session["login_url"]
+    upstream_request = request.app.state.http.build_request(
+        request.method, target, headers=headers, content=await request.body(),
+    )
+    try:
+        upstream = await request.app.state.http.send(upstream_request, stream=False)
+    except httpx.RequestError:
+        raise HTTPException(502, "Página de autenticação indisponível") from None
+
+    for raw_cookie in upstream.headers.get_list("set-cookie"):
+        parsed_cookie = SimpleCookie()
+        parsed_cookie.load(raw_cookie)
+        for name, morsel in parsed_cookie.items():
+            session["cookies"][name] = morsel.value
+    session["last_url"] = str(upstream.url)
+
+    location = upstream.headers.get("location")
+    if location:
+        redirect_target = urljoin(target, location)
+        if not _same_origin(session["login_url"], redirect_target):
+            raise HTTPException(403, "Redirecionamento externo bloqueado")
+        if _matches_auth_success(redirect_target, session["success_url"]):
+            return _complete_proprietary_login(request, session_id, session)
+        return RedirectResponse(_auth_proxy_url(session_id, redirect_target), 303)
+
+    response_headers = {
+        key: value for key, value in upstream.headers.items()
+        if key.lower() not in HOP_BY_HOP
+        and key.lower() not in {"set-cookie", "content-security-policy", "content-encoding"}
+    }
+    media_type = upstream.headers.get("content-type", "")
+    body = upstream.content
+    if "text/html" in media_type:
+        body = _rewrite_login_html(upstream.text, target, session_id).encode("utf-8")
+        response_headers["content-type"] = "text/html; charset=utf-8"
+        response_headers.pop("content-length", None)
+    return Response(body, status_code=upstream.status_code, headers=response_headers)
 
 
 SUSPICIOUS_PATH_MARKERS = (
@@ -938,6 +1107,50 @@ async def proxy_request(request: Request, project: dict, path: str):
             location_consent_html(project),
             headers={"Cache-Control": "no-store", "Permissions-Policy": "geolocation=(self)"},
         )
+    login_policy = next((
+        policy for policy in policies
+        if policy["enabled"] and policy["type"] == "proprietary_login"
+    ), None)
+    proprietary_access = request.cookies.get(
+        f"inlock_proprietary_{project['id']}", ""
+    )
+    if login_policy and not verify_access(
+        proprietary_access, project["id"], config.secret_key
+    ):
+        if request.method != "GET" or "text/html" not in request.headers.get("accept", ""):
+            return JSONResponse({"detail": "Autenticação proprietária necessária"}, 401)
+        browser_secret = request.cookies.get("inlock_proprietary_browser") or random_token()
+        session_id = random_token(24)
+        return_path = request_return_path(request)
+        now = int(time.time())
+        sessions = request.app.state.proprietary_login_sessions
+        for stale_id in [
+            key for key, value in sessions.items() if value["expires_at"] < now
+        ]:
+            sessions.pop(stale_id, None)
+        sessions[session_id] = {
+            "project_id": project["id"],
+            "policy_id": login_policy["id"],
+            "login_url": login_policy["config"]["login_url"],
+            "success_url": login_policy["config"]["success_url"],
+            "return_path": return_path,
+            "browser_hash": browser_hash(browser_secret, config.secret_key),
+            "cookies": {}, "last_url": "",
+            "expires_at": now + config.proprietary_login_ttl_seconds,
+        }
+        response = RedirectResponse(
+            _auth_proxy_url(session_id, login_policy["config"]["login_url"]), 303
+        )
+        response.set_cookie(
+            "inlock_proprietary_browser", browser_secret,
+            max_age=config.proprietary_login_ttl_seconds, httponly=True,
+            secure=config.secure_cookies, samesite="lax", path="/",
+        )
+        store(request).audit(
+            project["id"], "proprietary_login", "required", ip,
+            policy_id=login_policy["id"],
+        )
+        return response
     query = f"?{request.url.query}" if request.url.query else ""
     url = f"{project['upstream_url']}/{path}{query}"
     headers = {key: value for key, value in request.headers.items() if key.lower() not in HOP_BY_HOP and key.lower() != "cookie"}

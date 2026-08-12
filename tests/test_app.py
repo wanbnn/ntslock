@@ -116,6 +116,74 @@ def test_browser_navigation_gets_location_gate_before_unprotected_upstream(clien
     assert response.headers["permissions-policy"] == "geolocation=(self)"
 
 
+def test_proprietary_login_mirrors_form_and_releases_project(client):
+    browser, headers = client
+    project = create_project(browser, headers, qr=False)
+    browser.post("/api/gate/demo/location-declined")
+    policy = browser.post(
+        f"/api/projects/{project['id']}/policies", headers=headers,
+        json={
+            "type": "proprietary_login", "name": "Login corporativo",
+            "config": {
+                "login_url": "https://auth.internal/login",
+                "success_url": "https://auth.internal/dashboard",
+            },
+        },
+    )
+    assert policy.status_code == 201
+
+    async def upstream(request: httpx.Request):
+        if request.url == "https://auth.internal/login" and request.method == "GET":
+            return httpx.Response(
+                200,
+                text='<form action="/session" method="post"><input name="user"></form>',
+                headers={"content-type": "text/html", "set-cookie": "flow=abc; HttpOnly"},
+            )
+        if request.url == "https://auth.internal/session" and request.method == "POST":
+            assert request.headers["cookie"] == "flow=abc"
+            return httpx.Response(302, headers={"location": "/dashboard"})
+        if request.url == "http://demo.internal:3000/private":
+            return httpx.Response(200, text="projeto liberado")
+        return httpx.Response(404)
+
+    old = app.state.http
+    app.state.http = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+    try:
+        started = browser.get(
+            "/p/demo/private", headers={"accept": "text/html"},
+            follow_redirects=False,
+        )
+        assert started.status_code == 303
+        mirrored = browser.get(started.headers["location"])
+        assert mirrored.status_code == 200
+        assert "/auth/proprietary/" in mirrored.text
+        action = re.search(r'action="([^"]+)"', mirrored.text).group(1)
+        completed = browser.post(action, data={"user": "authorized"}, follow_redirects=False)
+        assert completed.status_code == 303
+        assert completed.headers["location"] == "/p/demo/private"
+        released = browser.get("/p/demo/private", headers={"accept": "text/html"})
+        assert released.text == "projeto liberado"
+    finally:
+        app.state.http = old
+
+
+def test_proprietary_login_rejects_cross_origin_success_url(client):
+    browser, headers = client
+    project = create_project(browser, headers, qr=False)
+    response = browser.post(
+        f"/api/projects/{project['id']}/policies", headers=headers,
+        json={
+            "type": "proprietary_login", "name": "Login inseguro",
+            "config": {
+                "login_url": "https://auth.internal/login",
+                "success_url": "https://attacker.example/success",
+            },
+        },
+    )
+    assert response.status_code == 422
+    assert "mesma origem" in response.json()["detail"]
+
+
 def test_container_project_is_rejected_when_direct_port_cannot_be_isolated(client):
     browser, headers = client
 
