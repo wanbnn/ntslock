@@ -11,13 +11,14 @@ def discover_containers(docker_url: str) -> dict[str, Any]:
         client.ping()
         containers = []
         for container in client.containers.list(all=True):
+            attrs = container.attrs
             ports = []
-            networks = container.attrs.get("NetworkSettings", {}).get("Networks") or {}
+            networks = attrs.get("NetworkSettings", {}).get("Networks") or {}
             container_ip = next(
                 (network.get("IPAddress") for network in networks.values() if network.get("IPAddress")),
                 "",
             )
-            for private, bindings in (container.attrs.get("NetworkSettings", {}).get("Ports") or {}).items():
+            for private, bindings in (attrs.get("NetworkSettings", {}).get("Ports") or {}).items():
                 private_port = private.split("/", 1)[0]
                 if bindings:
                     for binding in bindings:
@@ -34,11 +35,17 @@ def discover_containers(docker_url: str) -> dict[str, Any]:
                         "private": int(private_port), "host": None,
                         "url": f"http://{container_ip or container.name}:{private_port}",
                     })
+            image = str(attrs.get("Config", {}).get("Image") or "").strip()
+            if not image:
+                image = str(attrs.get("Image") or "").removeprefix("sha256:")[:12]
             containers.append({
                 "id": container.id,
                 "short_id": container.short_id,
                 "name": container.name,
-                "image": container.image.tags[0] if container.image.tags else container.image.short_id,
+                # Não consulta /images/{id}: o Coolify pode remover uma imagem
+                # antiga enquanto o container ainda existe, e isso não deve
+                # invalidar toda a descoberta do daemon.
+                "image": image or "imagem indisponível",
                 "status": container.status,
                 "ports": ports,
                 "labels": container.labels,
