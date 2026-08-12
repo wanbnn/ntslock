@@ -147,7 +147,10 @@ def test_proprietary_login_mirrors_form_and_releases_project(client):
         return httpx.Response(404)
 
     old = app.state.http
-    app.state.http = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+    old_factory = app.state.proprietary_http_factory
+    transport = httpx.MockTransport(upstream)
+    app.state.http = httpx.AsyncClient(transport=transport)
+    app.state.proprietary_http_factory = lambda: httpx.AsyncClient(transport=transport)
     try:
         started = browser.get(
             "/p/demo/private", headers={"accept": "text/html"},
@@ -165,23 +168,87 @@ def test_proprietary_login_mirrors_form_and_releases_project(client):
         assert released.text == "projeto liberado"
     finally:
         app.state.http = old
+        app.state.proprietary_http_factory = old_factory
 
 
-def test_proprietary_login_rejects_cross_origin_success_url(client):
+def test_proprietary_login_follows_cross_origin_redirect_chain(client):
     browser, headers = client
     project = create_project(browser, headers, qr=False)
+    browser.post("/api/gate/demo/location-declined")
     response = browser.post(
         f"/api/projects/{project['id']}/policies", headers=headers,
         json={
-            "type": "proprietary_login", "name": "Login inseguro",
+            "type": "proprietary_login", "name": "Login federado próprio",
             "config": {
                 "login_url": "https://auth.internal/login",
-                "success_url": "https://attacker.example/success",
+                "success_url": "https://portal.internal/success",
             },
         },
     )
-    assert response.status_code == 422
-    assert "mesma origem" in response.json()["detail"]
+    assert response.status_code == 201
+
+    async def upstream(request: httpx.Request):
+        if request.url == "https://auth.internal/login":
+            return httpx.Response(
+                302, headers={
+                    "location": "https://identity.internal/auth",
+                    "set-cookie": "auth_flow=one; HttpOnly",
+                },
+            )
+        if request.url == "https://identity.internal/auth":
+            assert "cookie" not in request.headers
+            return httpx.Response(
+                302, headers={
+                    "location": "https://portal.internal/success?ticket=ok",
+                    "set-cookie": "identity_flow=two; HttpOnly",
+                },
+            )
+        return httpx.Response(404)
+
+    old = app.state.http
+    old_factory = app.state.proprietary_http_factory
+    transport = httpx.MockTransport(upstream)
+    app.state.http = httpx.AsyncClient(transport=transport)
+    app.state.proprietary_http_factory = lambda: httpx.AsyncClient(transport=transport)
+    try:
+        started = browser.get(
+            "/p/demo/private", headers={"accept": "text/html"},
+            follow_redirects=False,
+        )
+        first = browser.get(started.headers["location"], follow_redirects=False)
+        assert first.status_code == 302
+        assert first.headers["location"].startswith("/auth/proprietary/")
+        second = browser.get(first.headers["location"], follow_redirects=False)
+        assert second.status_code == 303
+        assert second.headers["location"] == "/p/demo/private"
+    finally:
+        app.state.http = old
+        app.state.proprietary_http_factory = old_factory
+
+
+def test_proprietary_login_blocks_origin_not_discovered_by_auth_flow(client):
+    browser, headers = client
+    project = create_project(browser, headers, qr=False)
+    browser.post("/api/gate/demo/location-declined")
+    browser.post(
+        f"/api/projects/{project['id']}/policies", headers=headers,
+        json={
+            "type": "proprietary_login", "name": "Login corporativo",
+            "config": {
+                "login_url": "https://auth.internal/login",
+                "success_url": "https://portal.internal/success",
+            },
+        },
+    )
+    started = browser.get(
+        "/p/demo/private", headers={"accept": "text/html"}, follow_redirects=False,
+    )
+    session_path = started.headers["location"].split("?", 1)[0]
+    blocked = browser.get(
+        session_path, params={"url": "https://unseen.example/steal"}
+    )
+    assert blocked.status_code == 403
+    assert "fora da origem" in blocked.json()["detail"]
 
 
 def test_container_project_is_rejected_when_direct_port_cannot_be_isolated(client):

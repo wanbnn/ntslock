@@ -285,9 +285,10 @@ geolocalização dos navegadores exige HTTPS ou localhost.
 ### Login proprietário espelhado
 
 A política **Login proprietário** espelha uma página de autenticação autorizada
-antes de liberar o upstream do projeto. A URL de login e a URL de sucesso devem
-usar exatamente a mesma origem (`scheme://host:porta`). Links, formulários,
-recursos e redirects para outras origens são bloqueados.
+antes de liberar o upstream do projeto. Redirects entre diferentes origens são
+acompanhados dentro da URL do Inlock; links e recursos descobertos em páginas já
+autorizadas também são espelhados. Uma origem arbitrária inserida diretamente no
+endpoint continua bloqueada até ser descoberta nessa cadeia.
 
 Os cookies da aplicação de login permanecem somente na memória do Inlock e são
 associados a uma sessão efêmera do navegador; não são enviados ao cliente nem
@@ -298,9 +299,8 @@ entram nos logs de auditoria. A sessão expira em 15 minutos por padrão:
 INLOCK_PROPRIETARY_LOGIN_TTL_SECONDS=900
 ```
 
-Este modo inicial não suporta aplicações que dependam de recursos, redirects,
-WebSockets, WebAuthn ou scripts hospedados em outras origens. Use-o apenas em
-aplicações próprias e previamente autorizadas.
+Este modo inicial não suporta WebSockets ou WebAuthn. Use-o apenas em aplicações
+próprias e previamente autorizadas.
 
 - Termine TLS antes do Inlock e use `INLOCK_SECURE_COOKIES=true`.
 - Configure somente proxies confiáveis em `INLOCK_TRUSTED_PROXIES`; apenas eles
