@@ -36,12 +36,12 @@ Em produção, configure HTTPS e `INLOCK_SECURE_COOKIES=true`.
 4. O navegador volta à aplicação protegida.
 5. O proxy do Inlock remove seus cookies internos, preserva o cookie JWT de
    integração e, após validá-lo, encaminha ao upstream os headers reservados
-   `X-Inlock-Identity-Token`, `X-Inlock-Issuer`, `X-Inlock-Project-ID` e
-   `X-Inlock-Project`.
+   `X-Inlock-Identity-Token`, `X-Inlock-Identity-JWK`, `X-Inlock-Issuer`,
+   `X-Inlock-Project-ID` e `X-Inlock-Project`.
 6. O backend da aplicação extrai e valida o JWT antes de criar seu usuário ou
    sua sessão local.
 
-O Inlock remove esses quatro headers de toda requisição recebida antes de inserir
+O Inlock remove esses cinco headers de toda requisição recebida antes de inserir
 seus próprios valores, impedindo spoofing pelo navegador. O upstream deve ficar
 inacessível diretamente, conforme o checklist de produção; os headers constituem
 o ponto de confiança zero-config entre o gateway e a aplicação.
@@ -96,7 +96,10 @@ não trate suas claims como válidas antes de verificar a assinatura.
 
 ## Validação obrigatória
 
-As chaves públicas são publicadas em:
+O header reservado `X-Inlock-Identity-JWK` contém exatamente a chave pública
+Ed25519 correspondente ao `kid` do token. Assim, a aplicação valida localmente e
+não precisa acessar o Inlock por rede, DNS ou túnel. As chaves também podem ser
+publicadas em instalações que exponham o endpoint:
 
 ```text
 https://inlock.exemplo.com/.well-known/jwks.json
@@ -104,8 +107,8 @@ https://inlock.exemplo.com/.well-known/jwks.json
 
 Para cada requisição autenticada, o backend deve:
 
-1. extrair token, issuer, ID e slug dos headers reservados enviados pelo Inlock;
-2. selecionar no JWKS a chave cujo `kid` corresponda ao header do JWT;
+1. extrair token, JWK, issuer, ID e slug dos headers reservados enviados pelo Inlock;
+2. confirmar que a JWK é Ed25519/EdDSA e seu `kid` corresponde ao header do JWT;
 3. aceitar exclusivamente o algoritmo `EdDSA`;
 4. validar assinatura, `exp`, `nbf`, `iss` e `aud`;
 5. confirmar que `project_id` e `project` são os esperados;

@@ -283,6 +283,8 @@ def test_responsive_inlock_login_mask_submits_selected_original_form(client):
     )
     assert policy.status_code == 201
 
+    forwarded_identity = {}
+
     async def auth_upstream(request: httpx.Request):
         if request.url == "https://auth.internal/login" and request.method == "GET":
             assert "Windows NT 10.0" in request.headers["user-agent"]
@@ -303,11 +305,22 @@ def test_responsive_inlock_login_mask_submits_selected_original_form(client):
                 "company": "1",
             }
             return httpx.Response(302, headers={"location": "/home"})
+        if request.url == "http://demo.internal:3000/private":
+            forwarded_identity.update({
+                name: request.headers.get(name, "") for name in (
+                    "x-inlock-identity-token", "x-inlock-issuer",
+                    "x-inlock-project-id", "x-inlock-project",
+                    "x-inlock-identity-jwk",
+                )
+            })
+            return httpx.Response(200, text="protected app")
         return httpx.Response(404)
 
     old_factory = app.state.proprietary_http_factory
+    old_http = app.state.http
     transport = httpx.MockTransport(auth_upstream)
     app.state.proprietary_http_factory = lambda: httpx.AsyncClient(transport=transport)
+    app.state.http = httpx.AsyncClient(transport=transport)
     try:
         started = browser.get(
             "/p/demo/private", headers={"accept": "text/html"}, follow_redirects=False,
@@ -347,6 +360,18 @@ def test_responsive_inlock_login_mask_submits_selected_original_form(client):
         )
         assert claims["name"] == "maria"
         assert claims["project"] == "demo"
+        protected = browser.get("/p/demo/private")
+        assert protected.status_code == 200
+        assert forwarded_identity == {
+            "x-inlock-identity-token": token,
+            "x-inlock-issuer": "http://localhost:14900",
+            "x-inlock-project-id": str(project["id"]),
+            "x-inlock-project": "demo",
+            "x-inlock-identity-jwk": next(
+                json.dumps(key, separators=(",", ":")) for key in jwks["keys"]
+                if key["kid"] == header["kid"]
+            ),
+        }
         active = browser.post(
             "/api/identity/introspect", json={"token": token}
         ).json()
@@ -359,8 +384,10 @@ def test_responsive_inlock_login_mask_submits_selected_original_form(client):
         assert browser.post(
             "/api/identity/introspect", json={"token": token}
         ).json() == {"active": False}
+
     finally:
         app.state.proprietary_http_factory = old_factory
+        app.state.http = old_http
 
 
 def test_container_project_is_rejected_when_direct_port_cannot_be_isolated(client):

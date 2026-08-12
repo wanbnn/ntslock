@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 from inlock.identity import IdentityKeyring, stable_subject
@@ -57,6 +58,10 @@ def test_valid_identity_creates_zero_config_trust_headers(tmp_path: Path):
         "x-inlock-issuer": "https://inlock.example",
         "x-inlock-project-id": "18",
         "x-inlock-project": "journeydemo",
+        "x-inlock-identity-jwk": json.dumps(next(
+            item for item in keyring.jwks()["keys"]
+            if item["kid"] == keyring.active_kid
+        ), separators=(",", ":")),
     }
     assert _identity_forward_headers(token, {"id": 19, "slug": "other"}, config, keyring) == {}
 
@@ -68,5 +73,6 @@ def test_client_cannot_spoof_reserved_identity_headers():
         "X-Inlock-Issuer": "https://attacker.example",
         "X-Inlock-Project-ID": "999",
         "X-Inlock-Project": "fake",
+        "X-Inlock-Identity-JWK": '{"kty":"OKP"}',
         "Cookie": "inlock_identity_fake=attacker-token",
     }) == {"Accept": "application/json"}

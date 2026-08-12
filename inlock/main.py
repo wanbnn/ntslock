@@ -4,6 +4,7 @@ import asyncio
 import hmac
 import io
 import ipaddress
+import json
 import re
 import sqlite3
 import time
@@ -78,7 +79,7 @@ HOP_BY_HOP = {
 }
 INLOCK_IDENTITY_HEADERS = {
     "x-inlock-identity-token", "x-inlock-issuer", "x-inlock-project-id",
-    "x-inlock-project",
+    "x-inlock-project", "x-inlock-identity-jwk",
 }
 PUBLIC_GATEWAY_PATHS = (
     "/static", "/api/gate", "/gate", "/auth", "/.well-known", "/api/identity",
@@ -160,11 +161,18 @@ def _identity_forward_headers(
         return {}
     if claims.get("project_id") != project["id"] or claims.get("project") != project["slug"]:
         return {}
+    token_kid = jwt.get_unverified_header(token).get("kid")
+    public_jwk = next(
+        (item for item in keyring.jwks()["keys"] if item.get("kid") == token_kid), None
+    )
+    if not public_jwk:
+        return {}
     return {
         "x-inlock-identity-token": token,
         "x-inlock-issuer": issuer,
         "x-inlock-project-id": str(project["id"]),
         "x-inlock-project": project["slug"],
+        "x-inlock-identity-jwk": json.dumps(public_jwk, separators=(",", ":")),
     }
 
 
