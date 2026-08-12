@@ -134,6 +134,30 @@ def approved_html() -> str:
     return """<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Acesso confirmado</title><link rel="stylesheet" href="/static/gate.css"></head><body><main class="mobile-confirm success"><div class="mobile-mark">✓</div><p class="eyebrow">ACESSO CONFIRMADO</p><h1>Tudo certo.</h1><p>O navegador original será liberado. Você já pode fechar esta página.</p></main></body></html>"""
 
 
+def proprietary_login_mask_html(
+    project: dict, session_id: str, error: str = ""
+) -> str:
+    error_markup = (
+        f'<p class="mask-error" role="alert">{html.escape(error)}</p>' if error else ""
+    )
+    return f"""<!doctype html><html lang="pt-BR"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Entrar · {html.escape(project['name'])}</title>
+<link rel="stylesheet" href="/static/proprietary-mask.css"></head><body>
+<main class="mask-shell"><section class="mask-copy"><a class="mask-brand" href="#"><span>◆</span> inlock</a>
+ <p class="mask-overline">ACESSO PROTEGIDO</p><h1>Entre para<br>continuar.</h1>
+ <p>Use suas credenciais corporativas. O Inlock transmite os dados diretamente para o serviço autorizado sem armazená-los.</p>
+ <div class="mask-trust"><i>✓</i><span><strong>Sessão isolada</strong><small>Cookies de autenticação permanecem somente no gateway.</small></span></div>
+</section><section class="mask-card"><header><span>IDENTIFICAÇÃO</span><i></i></header>
+ <h2>{html.escape(project['name'])}</h2><p>Informe seus dados de acesso.</p>{error_markup}
+ <form method="post" action="/auth/proprietary/{html.escape(session_id)}/mask" autocomplete="on">
+  <label>Login<input name="inlock_username" autocomplete="username" required autofocus></label>
+  <label>Senha<input name="inlock_password" type="password" autocomplete="current-password" required></label>
+  <button type="submit">Entrar com segurança</button>
+ </form><small>Suas credenciais não são registradas nos logs do Inlock.</small>
+</section></main></body></html>"""
+
+
 def browser_probe_html(project: dict, probe_id: str) -> str:
     no_script = html.escape(json.dumps({"js": False}, separators=(",", ":")), quote=True)
     return f"""<!doctype html><html lang="pt-BR"><head><meta charset="utf-8">

@@ -11,7 +11,7 @@ from collections import Counter, defaultdict
 from contextlib import asynccontextmanager, suppress
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from urllib.parse import quote, unquote, urljoin, urlparse
+from urllib.parse import quote, unquote, urlencode, urljoin, urlparse
 
 import httpx
 import qrcode
@@ -25,6 +25,8 @@ from fastapi.responses import (
     StreamingResponse,
 )
 from fastapi.staticfiles import StaticFiles
+from lxml import html as lxml_html
+from lxml.etree import XPathError
 from starlette.background import BackgroundTask
 
 from .bot_defense import (
@@ -59,6 +61,7 @@ from .ui import (
     dashboard_html,
     gate_html,
     location_consent_html,
+    proprietary_login_mask_html,
 )
 
 HOP_BY_HOP = {
@@ -304,6 +307,20 @@ def _validate_policy(payload: PolicyCreate) -> None:
             raise HTTPException(422, "URLs de autenticação não podem conter credenciais")
         if not isinstance(config.get("force_desktop", False), bool):
             raise HTTPException(422, "force_desktop deve ser verdadeiro ou falso")
+        if not isinstance(config.get("login_mask", False), bool):
+            raise HTTPException(422, "login_mask deve ser verdadeiro ou falso")
+        if config.get("login_mask"):
+            selector_types = {
+                "username_selector_type": {"id", "name", "xpath"},
+                "password_selector_type": {"id", "name", "xpath"},
+                "submit_selector_type": {"id", "name", "type", "xpath"},
+            }
+            for field, accepted in selector_types.items():
+                if config.get(field) not in accepted:
+                    raise HTTPException(422, f"{field} inválido")
+                selector = field.removesuffix("_type")
+                if not str(config.get(selector, "")).strip():
+                    raise HTTPException(422, f"{selector} é obrigatório")
 
 
 @app.get("/health", include_in_schema=False)
@@ -538,6 +555,92 @@ def _auth_session(request: Request, session_id: str) -> dict:
     return session
 
 
+def _mask_element(document, selector_type: str, selector: str, tags: tuple[str, ...]):
+    try:
+        if selector_type == "xpath":
+            matches = document.xpath(selector)
+        else:
+            matches = document.xpath(
+                f"//*[self::input or self::button][@{selector_type}=$value]",
+                value=selector,
+            )
+    except XPathError:
+        raise HTTPException(502, f"XPath inválido para {selector_type}") from None
+    matches = [node for node in matches if getattr(node, "tag", "").lower() in tags]
+    if len(matches) != 1:
+        raise HTTPException(
+            502, f"Seletor {selector_type} deve localizar exatamente um elemento"
+        )
+    return matches[0]
+
+
+def _extract_mask_form(content: str, page_url: str, config: dict) -> dict:
+    document = lxml_html.document_fromstring(content, base_url=page_url)
+    username = _mask_element(
+        document, config["username_selector_type"], config["username_selector"],
+        ("input",),
+    )
+    password = _mask_element(
+        document, config["password_selector_type"], config["password_selector"],
+        ("input",),
+    )
+    submit = _mask_element(
+        document, config["submit_selector_type"], config["submit_selector"],
+        ("input", "button"),
+    )
+    forms = username.xpath("ancestor::form[1]")
+    if not forms or forms[0] not in password.xpath("ancestor::form[1]"):
+        raise HTTPException(502, "Login e senha precisam pertencer ao mesmo formulário")
+    form = forms[0]
+    if form not in submit.xpath("ancestor::form[1]"):
+        raise HTTPException(502, "Submit precisa pertencer ao formulário de login")
+    if not username.get("name") or not password.get("name"):
+        raise HTTPException(502, "Inputs de login e senha precisam possuir name")
+    fields: list[tuple[str, str]] = []
+    for node in form.xpath(".//input[@name]"):
+        field_type = (node.get("type") or "text").casefold()
+        if field_type == "hidden":
+            fields.append((node.get("name"), node.get("value") or ""))
+    submit_name = submit.get("name")
+    if submit_name:
+        fields.append((submit_name, submit.get("value") or ""))
+    return {
+        "action": urljoin(page_url, form.get("action") or page_url),
+        "method": (form.get("method") or "get").upper(),
+        "username_name": username.get("name"),
+        "password_name": password.get("name"),
+        "fields": fields,
+    }
+
+
+async def _prepare_login_mask(session: dict) -> None:
+    target = session.get("mask_page_url") or session["login_url"]
+    auth_http: httpx.AsyncClient = session["http"]
+    headers = {"accept": "text/html,application/xhtml+xml"}
+    if session["force_desktop"]:
+        headers["user-agent"] = DESKTOP_LOGIN_USER_AGENT
+    for _ in range(10):
+        try:
+            upstream = await auth_http.get(target, headers=headers, follow_redirects=False)
+        except httpx.RequestError:
+            raise HTTPException(502, "Página de autenticação indisponível") from None
+        location = upstream.headers.get("location")
+        if not location:
+            if "text/html" not in upstream.headers.get("content-type", ""):
+                raise HTTPException(502, "A URL de login não retornou uma página HTML")
+            session["mask_page_url"] = target
+            session["mask_form"] = _extract_mask_form(
+                upstream.text, target, session["policy_config"]
+            )
+            return
+        target = urljoin(target, location)
+        target_origin = _origin(target)
+        if not target_origin:
+            raise HTTPException(403, "Protocolo de redirecionamento bloqueado")
+        session["allowed_origins"].add(target_origin)
+    raise HTTPException(508, "A página de login excedeu o limite de redirecionamentos")
+
+
 async def _complete_proprietary_login(
     request: Request, session_id: str, session: dict
 ) -> RedirectResponse:
@@ -559,6 +662,87 @@ async def _complete_proprietary_login(
         client_ip(request, config.trusted_proxies),
     )
     return response
+
+
+@app.get("/auth/proprietary/{session_id}/mask", include_in_schema=False)
+async def proprietary_login_mask(session_id: str, request: Request):
+    session = _auth_session(request, session_id)
+    if not session["login_mask"]:
+        raise HTTPException(404, "Máscara de login não configurada")
+    await _prepare_login_mask(session)
+    project = store(request).project(session["project_id"])
+    if not project:
+        raise HTTPException(404, "Projeto não encontrado")
+    return HTMLResponse(
+        proprietary_login_mask_html(project, session_id),
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.post("/auth/proprietary/{session_id}/mask", include_in_schema=False)
+async def submit_proprietary_login_mask(
+    session_id: str, request: Request,
+    inlock_username: str = Form(...), inlock_password: str = Form(...),
+):
+    session = _auth_session(request, session_id)
+    if not session["login_mask"]:
+        raise HTTPException(404, "Máscara de login não configurada")
+    if not session.get("mask_form"):
+        await _prepare_login_mask(session)
+    form = session["mask_form"]
+    action_origin = _origin(form["action"])
+    if not action_origin:
+        raise HTTPException(403, "Action do formulário possui protocolo inválido")
+    session["allowed_origins"].add(action_origin)
+    fields = [
+        *form["fields"],
+        (form["username_name"], inlock_username),
+        (form["password_name"], inlock_password),
+    ]
+    headers = {
+        "accept": "text/html,application/xhtml+xml",
+        "content-type": "application/x-www-form-urlencoded",
+        "referer": session["mask_page_url"],
+        "origin": _origin(session["mask_page_url"]),
+    }
+    if session["force_desktop"]:
+        headers["user-agent"] = DESKTOP_LOGIN_USER_AGENT
+    auth_http: httpx.AsyncClient = session["http"]
+    try:
+        upstream = await auth_http.request(
+            form["method"], form["action"], content=urlencode(fields).encode(),
+            headers=headers, follow_redirects=False,
+        )
+    except httpx.RequestError:
+        raise HTTPException(502, "Serviço de autenticação indisponível") from None
+    location = upstream.headers.get("location")
+    if location:
+        target = urljoin(form["action"], location)
+        target_origin = _origin(target)
+        if not target_origin:
+            raise HTTPException(403, "Protocolo de redirecionamento bloqueado")
+        session["allowed_origins"].add(target_origin)
+        if _matches_auth_success(target, session["success_url"]):
+            return await _complete_proprietary_login(request, session_id, session)
+        return RedirectResponse(_auth_proxy_url(session_id, target), 303)
+    project = store(request).project(session["project_id"])
+    if not project:
+        raise HTTPException(404, "Projeto não encontrado")
+    if "text/html" in upstream.headers.get("content-type", ""):
+        try:
+            session["mask_form"] = _extract_mask_form(
+                upstream.text, str(upstream.url), session["policy_config"]
+            )
+            session["mask_page_url"] = str(upstream.url)
+        except HTTPException:
+            pass
+    return HTMLResponse(
+        proprietary_login_mask_html(
+            project, session_id,
+            "Não foi possível concluir o login. Verifique os dados e tente novamente.",
+        ),
+        status_code=401, headers={"Cache-Control": "no-store"},
+    )
 
 
 @app.api_route(
@@ -1175,15 +1359,20 @@ async def proxy_request(request: Request, project: dict, path: str):
             "login_url": login_policy["config"]["login_url"],
             "success_url": login_policy["config"]["success_url"],
             "force_desktop": bool(login_policy["config"].get("force_desktop", False)),
+            "login_mask": bool(login_policy["config"].get("login_mask", False)),
+            "policy_config": dict(login_policy["config"]),
             "return_path": return_path,
             "browser_hash": browser_hash(browser_secret, config.secret_key),
             "last_url": "", "http": request.app.state.proprietary_http_factory(),
             "allowed_origins": {_origin(login_policy["config"]["login_url"])},
             "expires_at": now + config.proprietary_login_ttl_seconds,
         }
-        response = RedirectResponse(
-            _auth_proxy_url(session_id, login_policy["config"]["login_url"]), 303
+        destination = (
+            f"/auth/proprietary/{session_id}/mask"
+            if sessions[session_id]["login_mask"]
+            else _auth_proxy_url(session_id, login_policy["config"]["login_url"])
         )
+        response = RedirectResponse(destination, 303)
         response.set_cookie(
             "inlock_proprietary_browser", browser_secret,
             max_age=config.proprietary_login_ttl_seconds, httponly=True,

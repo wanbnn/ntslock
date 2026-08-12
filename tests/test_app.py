@@ -1,6 +1,7 @@
 import json
 import re
 from pathlib import Path
+from urllib.parse import parse_qsl
 
 import httpx
 import pytest
@@ -255,6 +256,71 @@ def test_proprietary_login_blocks_origin_not_discovered_by_auth_flow(client):
     )
     assert blocked.status_code == 403
     assert "fora da origem" in blocked.json()["detail"]
+
+
+def test_responsive_inlock_login_mask_submits_selected_original_form(client):
+    browser, headers = client
+    project = create_project(browser, headers, qr=False)
+    browser.post("/api/gate/demo/location-declined")
+    policy = browser.post(
+        f"/api/projects/{project['id']}/policies", headers=headers,
+        json={
+            "type": "proprietary_login", "name": "Login com máscara",
+            "config": {
+                "login_url": "https://auth.internal/login",
+                "success_url": "https://auth.internal/home",
+                "force_desktop": True, "login_mask": True,
+                "username_selector_type": "id", "username_selector": "user-field",
+                "password_selector_type": "xpath",
+                "password_selector": "//input[@data-secret='main']",
+                "submit_selector_type": "type", "submit_selector": "submit",
+            },
+        },
+    )
+    assert policy.status_code == 201
+
+    async def auth_upstream(request: httpx.Request):
+        if request.url == "https://auth.internal/login" and request.method == "GET":
+            assert "Windows NT 10.0" in request.headers["user-agent"]
+            return httpx.Response(200, text="""<html><body><form method="post" action="/session">
+                <input type="hidden" name="csrf" value="token-123">
+                <input id="user-field" name="corporate_user">
+                <input data-secret="main" name="corporate_password" type="password">
+                <button type="submit" name="operation" value="login">Login</button>
+                </form></body></html>""", headers={"content-type": "text/html"})
+        if request.url == "https://auth.internal/session" and request.method == "POST":
+            assert dict(request.url.params) == {}
+            values = dict(parse_qsl(request.content.decode()))
+            assert values == {
+                "csrf": "token-123", "operation": "login",
+                "corporate_user": "maria", "corporate_password": "segredo",
+            }
+            return httpx.Response(302, headers={"location": "/home"})
+        return httpx.Response(404)
+
+    old_factory = app.state.proprietary_http_factory
+    transport = httpx.MockTransport(auth_upstream)
+    app.state.proprietary_http_factory = lambda: httpx.AsyncClient(transport=transport)
+    try:
+        started = browser.get(
+            "/p/demo/private", headers={"accept": "text/html"}, follow_redirects=False,
+        )
+        assert started.status_code == 303
+        assert started.headers["location"].endswith("/mask")
+        mask = browser.get(started.headers["location"])
+        assert mask.status_code == 200
+        assert "Entre para" in mask.text
+        assert 'name="inlock_username"' in mask.text
+        completed = browser.post(
+            started.headers["location"],
+            data={"inlock_username": "maria", "inlock_password": "segredo"},
+            follow_redirects=False,
+        )
+        assert completed.status_code == 303
+        assert completed.headers["location"] == "/p/demo/private"
+        assert f"inlock_proprietary_{project['id']}" in browser.cookies
+    finally:
+        app.state.proprietary_http_factory = old_factory
 
 
 def test_container_project_is_rejected_when_direct_port_cannot_be_isolated(client):

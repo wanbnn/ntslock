@@ -295,6 +295,14 @@ envia um User-Agent desktop e fixa o viewport das páginas de autenticação em
 1280 pixels. Depois da liberação, o upstream protegido continua recebendo as
 características reais do dispositivo e permanece responsivo em celulares.
 
+Com **Usar tela de login do Inlock**, o administrador informa como localizar os
+inputs de login e senha por `id`, `name` ou XPath e o submit por `id`, `name`,
+`type` ou XPath. O Inlock abre a página original no backend, preserva cookies e
+campos ocultos como tokens CSRF, e apresenta ao visitante uma máscara própria e
+responsiva. Essa máscara permanece responsiva mesmo quando **Forçar modo
+computador** estiver ativo; o modo desktop continua aplicado apenas à comunicação
+com a aplicação proprietária.
+
 Os cookies da aplicação de login permanecem somente na memória do Inlock e são
 associados a uma sessão efêmera do navegador; não são enviados ao cliente nem
 gravados no banco. Corpos de formulários são retransmitidos em memória e não
