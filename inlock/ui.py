@@ -135,10 +135,23 @@ def approved_html() -> str:
 
 
 def proprietary_login_mask_html(
-    project: dict, session_id: str, error: str = ""
+    project: dict, session_id: str, controls: list[dict] | None = None,
+    error: str = "",
 ) -> str:
     error_markup = (
         f'<p class="mask-error" role="alert">{html.escape(error)}</p>' if error else ""
+    )
+    extra_controls = "".join(
+        f'<label>{html.escape(control["label"])}<select name="inlock_extra_{index}">'
+        + "".join(
+            f'<option value="{html.escape(option["value"], quote=True)}"'
+            f'{" selected" if option["selected"] else ""}>'
+            f'{html.escape(option["label"])}</option>'
+            for option in control["options"]
+        )
+        + "</select></label>"
+        for index, control in enumerate(controls or [])
+        if control["kind"] == "select"
     )
     return f"""<!doctype html><html lang="pt-BR"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -153,6 +166,7 @@ def proprietary_login_mask_html(
  <form method="post" action="/auth/proprietary/{html.escape(session_id)}/mask" autocomplete="on">
   <label>Login<input name="inlock_username" autocomplete="username" required autofocus></label>
   <label>Senha<input name="inlock_password" type="password" autocomplete="current-password" required></label>
+  {extra_controls}
   <button type="submit">Entrar com segurança</button>
  </form><small>Suas credenciais não são registradas nos logs do Inlock.</small>
 </section></main></body></html>"""

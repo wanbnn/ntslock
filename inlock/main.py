@@ -597,10 +597,38 @@ def _extract_mask_form(content: str, page_url: str, config: dict) -> dict:
     if not username.get("name") or not password.get("name"):
         raise HTTPException(502, "Inputs de login e senha precisam possuir name")
     fields: list[tuple[str, str]] = []
+    controls: list[dict] = []
     for node in form.xpath(".//input[@name]"):
+        if node.get("disabled") is not None or node in {username, password, submit}:
+            continue
         field_type = (node.get("type") or "text").casefold()
-        if field_type == "hidden":
+        if field_type == "hidden" or (
+            field_type in {"checkbox", "radio"} and node.get("checked") is not None
+        ):
             fields.append((node.get("name"), node.get("value") or ""))
+    for node in form.xpath(".//textarea[@name][not(@disabled)]"):
+        fields.append((node.get("name"), node.text or ""))
+    for node in form.xpath(".//select[@name][not(@disabled)]"):
+        options = node.xpath(".//option[not(@disabled)]")
+        selected = [option for option in options if option.get("selected") is not None]
+        if not selected and options:
+            selected = [options[0]]
+        control_options = [{
+            "value": option.get("value") if option.get("value") is not None
+            else (option.text_content() or "").strip(),
+            "label": (option.text_content() or "").strip(),
+            "selected": option in selected,
+        } for option in options]
+        label_nodes = document.xpath("//label[@for=$id]", id=node.get("id") or "")
+        label = (
+            (label_nodes[0].text_content() or "").strip() if label_nodes
+            else node.get("aria-label") or node.get("name")
+        )
+        controls.append({
+            "kind": "select", "name": node.get("name"),
+            "label": label, "multiple": node.get("multiple") is not None,
+            "options": control_options,
+        })
     submit_name = submit.get("name")
     if submit_name:
         fields.append((submit_name, submit.get("value") or ""))
@@ -609,7 +637,8 @@ def _extract_mask_form(content: str, page_url: str, config: dict) -> dict:
         "method": (form.get("method") or "get").upper(),
         "username_name": username.get("name"),
         "password_name": password.get("name"),
-        "fields": fields,
+        "fields": fields, "controls": controls,
+        "enctype": (form.get("enctype") or "application/x-www-form-urlencoded").casefold(),
     }
 
 
@@ -674,7 +703,9 @@ async def proprietary_login_mask(session_id: str, request: Request):
     if not project:
         raise HTTPException(404, "Projeto não encontrado")
     return HTMLResponse(
-        proprietary_login_mask_html(project, session_id),
+        proprietary_login_mask_html(
+            project, session_id, session["mask_form"]["controls"]
+        ),
         headers={"Cache-Control": "no-store"},
     )
 
@@ -690,6 +721,7 @@ async def submit_proprietary_login_mask(
     if not session.get("mask_form"):
         await _prepare_login_mask(session)
     form = session["mask_form"]
+    submitted = await request.form()
     action_origin = _origin(form["action"])
     if not action_origin:
         raise HTTPException(403, "Action do formulário possui protocolo inválido")
@@ -699,9 +731,17 @@ async def submit_proprietary_login_mask(
         (form["username_name"], inlock_username),
         (form["password_name"], inlock_password),
     ]
+    for index, control in enumerate(form["controls"]):
+        supplied = submitted.getlist(f"inlock_extra_{index}")
+        allowed = {option["value"] for option in control["options"]}
+        values = [value for value in supplied if value in allowed]
+        if not values:
+            values = [
+                option["value"] for option in control["options"] if option["selected"]
+            ]
+        fields.extend((control["name"], value) for value in values)
     headers = {
         "accept": "text/html,application/xhtml+xml",
-        "content-type": "application/x-www-form-urlencoded",
         "referer": session["mask_page_url"],
         "origin": _origin(session["mask_page_url"]),
     }
@@ -709,10 +749,23 @@ async def submit_proprietary_login_mask(
         headers["user-agent"] = DESKTOP_LOGIN_USER_AGENT
     auth_http: httpx.AsyncClient = session["http"]
     try:
-        upstream = await auth_http.request(
-            form["method"], form["action"], content=urlencode(fields).encode(),
-            headers=headers, follow_redirects=False,
-        )
+        if form["method"] == "GET":
+            upstream = await auth_http.request(
+                "GET", form["action"], params=fields,
+                headers=headers, follow_redirects=False,
+            )
+        elif form["enctype"] == "multipart/form-data":
+            upstream = await auth_http.request(
+                form["method"], form["action"], files=[
+                    (name, (None, value)) for name, value in fields
+                ], headers=headers, follow_redirects=False,
+            )
+        else:
+            headers["content-type"] = "application/x-www-form-urlencoded"
+            upstream = await auth_http.request(
+                form["method"], form["action"], content=urlencode(fields).encode(),
+                headers=headers, follow_redirects=False,
+            )
     except httpx.RequestError:
         raise HTTPException(502, "Serviço de autenticação indisponível") from None
     location = upstream.headers.get("location")
@@ -738,7 +791,7 @@ async def submit_proprietary_login_mask(
             pass
     return HTMLResponse(
         proprietary_login_mask_html(
-            project, session_id,
+            project, session_id, session["mask_form"]["controls"],
             "Não foi possível concluir o login. Verifique os dados e tente novamente.",
         ),
         status_code=401, headers={"Cache-Control": "no-store"},

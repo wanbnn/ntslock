@@ -286,6 +286,8 @@ def test_responsive_inlock_login_mask_submits_selected_original_form(client):
                 <input type="hidden" name="csrf" value="token-123">
                 <input id="user-field" name="corporate_user">
                 <input data-secret="main" name="corporate_password" type="password">
+                <select name="company"><option value="1">Empresa A</option>
+                <option value="3" selected>Empresa C</option></select>
                 <button type="submit" name="operation" value="login">Login</button>
                 </form></body></html>""", headers={"content-type": "text/html"})
         if request.url == "https://auth.internal/session" and request.method == "POST":
@@ -294,6 +296,7 @@ def test_responsive_inlock_login_mask_submits_selected_original_form(client):
             assert values == {
                 "csrf": "token-123", "operation": "login",
                 "corporate_user": "maria", "corporate_password": "segredo",
+                "company": "1",
             }
             return httpx.Response(302, headers={"location": "/home"})
         return httpx.Response(404)
@@ -311,9 +314,14 @@ def test_responsive_inlock_login_mask_submits_selected_original_form(client):
         assert mask.status_code == 200
         assert "Entre para" in mask.text
         assert 'name="inlock_username"' in mask.text
+        assert 'name="inlock_extra_0"' in mask.text
+        assert '<option value="3" selected>' in mask.text
         completed = browser.post(
             started.headers["location"],
-            data={"inlock_username": "maria", "inlock_password": "segredo"},
+            data={
+                "inlock_username": "maria", "inlock_password": "segredo",
+                "inlock_extra_0": "1",
+            },
             follow_redirects=False,
         )
         assert completed.status_code == 303
