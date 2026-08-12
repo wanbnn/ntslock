@@ -1,5 +1,8 @@
 # Inlock
 
+Documentação adicional: [integração de aplicações com o login pela máscara do
+Inlock](docs/integracao-login-mascara.md).
+
 Inlock é um firewall de aplicação e reverse proxy para serviços locais e
 containers Docker. Cada projeto recebe uma rota protegida e uma cadeia de
 políticas avaliada antes de qualquer requisição chegar ao upstream.

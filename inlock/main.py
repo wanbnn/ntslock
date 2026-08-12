@@ -76,6 +76,10 @@ HOP_BY_HOP = {
     "connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te",
     "trailers", "transfer-encoding", "upgrade", "host", "content-length",
 }
+INLOCK_IDENTITY_HEADERS = {
+    "x-inlock-identity-token", "x-inlock-issuer", "x-inlock-project-id",
+    "x-inlock-project",
+}
 PUBLIC_GATEWAY_PATHS = (
     "/static", "/api/gate", "/gate", "/auth", "/.well-known", "/api/identity",
 )
@@ -141,6 +145,37 @@ def _upstream_cookies(cookie_header: str, identity_cookie_name: str = "") -> str
         if item and (not name.startswith("inlock_") or name == identity_cookie_name):
             forwarded.append(item)
     return "; ".join(forwarded)
+
+
+def _identity_forward_headers(
+    token: str, project: dict, config: Settings, keyring: IdentityKeyring
+) -> dict[str, str]:
+    """Cria o ponto de confiança zero-config somente para tokens válidos do projeto."""
+    if not token:
+        return {}
+    issuer = config.public_url.rstrip("/")
+    try:
+        claims = keyring.decode(token, issuer, f"inlock:project:{project['id']}")
+    except jwt.PyJWTError:
+        return {}
+    if claims.get("project_id") != project["id"] or claims.get("project") != project["slug"]:
+        return {}
+    return {
+        "x-inlock-identity-token": token,
+        "x-inlock-issuer": issuer,
+        "x-inlock-project-id": str(project["id"]),
+        "x-inlock-project": project["slug"],
+    }
+
+
+def _upstream_headers(headers) -> dict[str, str]:
+    """Copia headers públicos removendo valores reservados que poderiam ser forjados."""
+    return {
+        key: value for key, value in headers.items()
+        if key.lower() not in HOP_BY_HOP
+        and key.lower() not in INLOCK_IDENTITY_HEADERS
+        and key.lower() != "cookie"
+    }
 
 
 @app.middleware("http")
@@ -1568,7 +1603,7 @@ async def proxy_request(request: Request, project: dict, path: str):
         return response
     query = f"?{request.url.query}" if request.url.query else ""
     url = f"{project['upstream_url']}/{path}{query}"
-    headers = {key: value for key, value in request.headers.items() if key.lower() not in HOP_BY_HOP and key.lower() != "cookie"}
+    headers = _upstream_headers(request.headers)
     identity_cookie_name = ""
     if login_policy and login_policy["config"].get("issue_identity_token", True):
         identity_cookie_name = (
@@ -1580,6 +1615,10 @@ async def proxy_request(request: Request, project: dict, path: str):
     )
     if forwarded_cookies:
         headers["cookie"] = forwarded_cookies
+    identity_token = request.cookies.get(identity_cookie_name, "") if identity_cookie_name else ""
+    headers.update(_identity_forward_headers(
+        identity_token, project, config, request.app.state.identity_keyring
+    ))
     headers["x-forwarded-for"] = ip
     headers["x-forwarded-proto"] = request.url.scheme
     headers["x-forwarded-host"] = request.headers.get("host", "")

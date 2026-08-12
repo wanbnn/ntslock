@@ -1,7 +1,8 @@
 from pathlib import Path
 
 from inlock.identity import IdentityKeyring, stable_subject
-from inlock.main import _upstream_cookies
+from inlock.config import Settings
+from inlock.main import _identity_forward_headers, _upstream_cookies, _upstream_headers
 
 
 def test_identity_keyring_persists_and_rotates_with_overlap(tmp_path: Path):
@@ -35,3 +36,37 @@ def test_only_integration_cookie_is_forwarded_among_internal_cookies():
     assert _upstream_cookies(header, "inlock_identity_demo") == (
         "app_preference=dark; inlock_identity_demo=signed.jwt"
     )
+
+
+def test_valid_identity_creates_zero_config_trust_headers(tmp_path: Path):
+    keyring = IdentityKeyring(tmp_path)
+    config = Settings(data_dir=tmp_path, public_url="https://inlock.example")
+    project = {"id": 18, "slug": "journeydemo"}
+    now = __import__("time").time()
+    token = keyring.sign({
+        "iss": "https://inlock.example", "aud": "inlock:project:18",
+        "sub": "stable", "name": "maria", "project_id": 18,
+        "project": "journeydemo", "jti": "session", "iat": int(now),
+        "nbf": int(now), "exp": int(now) + 300,
+    })
+
+    headers = _identity_forward_headers(token, project, config, keyring)
+
+    assert headers == {
+        "x-inlock-identity-token": token,
+        "x-inlock-issuer": "https://inlock.example",
+        "x-inlock-project-id": "18",
+        "x-inlock-project": "journeydemo",
+    }
+    assert _identity_forward_headers(token, {"id": 19, "slug": "other"}, config, keyring) == {}
+
+
+def test_client_cannot_spoof_reserved_identity_headers():
+    assert _upstream_headers({
+        "Accept": "application/json",
+        "X-Inlock-Identity-Token": "attacker-token",
+        "X-Inlock-Issuer": "https://attacker.example",
+        "X-Inlock-Project-ID": "999",
+        "X-Inlock-Project": "fake",
+        "Cookie": "inlock_identity_fake=attacker-token",
+    }) == {"Accept": "application/json"}
