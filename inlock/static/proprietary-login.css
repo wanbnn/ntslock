@@ -1,0 +1,1 @@
+.proprietary-origin{display:grid;grid-template-columns:minmax(0,1fr) 220px;gap:12px;align-items:end}.proprietary-origin>label:first-child{display:grid;gap:7px}.desktop-switch{min-height:42px;padding:9px 11px!important}.desktop-switch span{line-height:1.15}@media(max-width:720px){.proprietary-origin{grid-template-columns:1fr}.desktop-switch{min-height:54px}}

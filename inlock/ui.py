@@ -67,7 +67,7 @@ def dashboard_html(tile_url: str) -> str:
 <meta name="description" content="Inlock — firewall de aplicação para workloads Docker">
 <title>Inlock · Centro de controle</title>
 <link rel="stylesheet" href="/static/vendor/leaflet/leaflet.css">
-<link rel="stylesheet" href="/static/dashboard.css"><link rel="stylesheet" href="/static/reports.css"></head><body>{body}
+<link rel="stylesheet" href="/static/dashboard.css"><link rel="stylesheet" href="/static/reports.css"><link rel="stylesheet" href="/static/proprietary-login.css"></head><body>{body}
 <div id="modal-root"></div><div id="toast-root"></div>
 <script type="application/json" id="inlock-config">{config}</script>
 <script src="/static/vendor/leaflet/leaflet.js"></script>

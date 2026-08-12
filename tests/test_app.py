@@ -127,6 +127,7 @@ def test_proprietary_login_mirrors_form_and_releases_project(client):
             "config": {
                 "login_url": "https://auth.internal/login",
                 "success_url": "https://auth.internal/dashboard",
+                "force_desktop": True,
             },
         },
     )
@@ -134,15 +135,18 @@ def test_proprietary_login_mirrors_form_and_releases_project(client):
 
     async def upstream(request: httpx.Request):
         if request.url == "https://auth.internal/login" and request.method == "GET":
+            assert "Windows NT 10.0" in request.headers["user-agent"]
+            assert "sec-ch-ua-mobile" not in request.headers
             return httpx.Response(
                 200,
-                text='<form action="/session" method="post"><input name="user"></form>',
+                text='<html><head><meta name="viewport" content="width=device-width"></head><body><form action="/session" method="post"><input name="user"></form></body></html>',
                 headers={"content-type": "text/html", "set-cookie": "flow=abc; HttpOnly"},
             )
         if request.url == "https://auth.internal/session" and request.method == "POST":
             assert request.headers["cookie"] == "flow=abc"
             return httpx.Response(302, headers={"location": "/dashboard"})
         if request.url == "http://demo.internal:3000/private":
+            assert request.headers["user-agent"] == "Mobile Browser Test"
             return httpx.Response(200, text="projeto liberado")
         return httpx.Response(404)
 
@@ -153,18 +157,20 @@ def test_proprietary_login_mirrors_form_and_releases_project(client):
     app.state.proprietary_http_factory = lambda: httpx.AsyncClient(transport=transport)
     try:
         started = browser.get(
-            "/p/demo/private", headers={"accept": "text/html"},
+            "/p/demo/private", headers={"accept": "text/html", "user-agent": "Mobile Browser Test"},
             follow_redirects=False,
         )
         assert started.status_code == 303
-        mirrored = browser.get(started.headers["location"])
+        mirrored = browser.get(started.headers["location"], headers={"user-agent": "Mobile Browser Test", "sec-ch-ua-mobile": "?1"})
         assert mirrored.status_code == 200
         assert "/auth/proprietary/" in mirrored.text
+        assert '<meta name="viewport" content="width=1280">' in mirrored.text
+        assert "width=device-width" not in mirrored.text
         action = re.search(r'action="([^"]+)"', mirrored.text).group(1)
         completed = browser.post(action, data={"user": "authorized"}, follow_redirects=False)
         assert completed.status_code == 303
         assert completed.headers["location"] == "/p/demo/private"
-        released = browser.get("/p/demo/private", headers={"accept": "text/html"})
+        released = browser.get("/p/demo/private", headers={"accept": "text/html", "user-agent": "Mobile Browser Test"})
         assert released.text == "projeto liberado"
     finally:
         app.state.http = old

@@ -290,6 +290,11 @@ acompanhados dentro da URL do Inlock; links e recursos descobertos em páginas j
 autorizadas também são espelhados. Uma origem arbitrária inserida diretamente no
 endpoint continua bloqueada até ser descoberta nessa cadeia.
 
+O switch **Forçar modo computador** altera somente o login espelhado: o Inlock
+envia um User-Agent desktop e fixa o viewport das páginas de autenticação em
+1280 pixels. Depois da liberação, o upstream protegido continua recebendo as
+características reais do dispositivo e permanece responsivo em celulares.
+
 Os cookies da aplicação de login permanecem somente na memória do Inlock e são
 associados a uma sessão efêmera do navegador; não são enviados ao cliente nem
 gravados no banco. Corpos de formulários são retransmitidos em memória e não

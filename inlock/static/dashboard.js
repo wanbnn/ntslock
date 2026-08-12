@@ -115,12 +115,12 @@ function policySummary(policy) {
   if (policy.type === 'bot_score') return `Análise progressiva · CAPTCHA quando o score atingir ${c.threshold ?? 65}`;
   if (policy.type === 'geo') return [...(c.countries || []), ...(c.states || []), ...(c.cities || []), c.radius ? `${c.radius.kilometers} km` : ''].filter(Boolean).join(', ') || 'Localização configurada';
   if (policy.type === 'user_agent') return (c.patterns || []).join(', ');
-  if (policy.type === 'proprietary_login') return `${c.login_url} → ${c.success_url}`;
+  if (policy.type === 'proprietary_login') return `${c.login_url} → ${c.success_url}${c.force_desktop ? ' · modo computador' : ''}`;
   return (c.networks || []).join(', ');
 }
 
 function policyFields(type) {
-  if (type === 'proprietary_login') return `<label class="full">URL da página de login<input name="login_url" type="url" required placeholder="https://auth.empresa.local/login"></label><label class="full">URL de sucesso<input name="success_url" type="url" required placeholder="https://app.empresa.local/dashboard"><small>O Inlock acompanha redirects entre origens e libera o projeto quando o servidor de login direcionar para esta URL.</small></label>`;
+  if (type === 'proprietary_login') return `<div class="full proprietary-origin"><label>URL da página de login<input name="login_url" type="url" required placeholder="https://auth.empresa.local/login"></label><label class="switch-row desktop-switch"><input type="checkbox" name="force_desktop"><i></i><span><strong>Forçar modo computador</strong><small>Somente durante o login espelhado.</small></span></label></div><label class="full">URL de sucesso<input name="success_url" type="url" required placeholder="https://app.empresa.local/dashboard"><small>O Inlock acompanha redirects entre origens e libera o projeto quando o servidor de login direcionar para esta URL.</small></label>`;
   if (type === 'rate_limit') return `<label>Requisições<input name="limit" type="number" min="1" value="60"></label><label>Janela (segundos)<input name="window" type="number" min="1" value="60"></label><label class="full">Escopo<select name="scope"><option value="ip">Por endereço IP</option><option value="global">Global para o projeto</option></select></label>`;
   if (type === 'bot_score') return `<label class="full">Confiança mínima (0–100)<input name="threshold" type="number" min="0" max="100" value="65" required><small>Combina requisição, JavaScript, interação, cookies, reputação local do IP e fingerprints. Navegadores novos passam por uma verificação curta; ao atingir este valor, o visitante resolve o CAPTCHA visual.</small></label>`;
   if (type === 'user_agent') return `<label class="full">Padrões bloqueados <span>(um por linha, aceita *)</span><textarea name="patterns" rows="5" placeholder="*bot*&#10;curl/*&#10;*crawler*"></textarea></label>`;
@@ -141,7 +141,7 @@ function openPolicyForm(project, selectedType = 'rate_limit') {
     if (selectedType === 'rate_limit') config = {limit:Number(form.get('limit')), window_seconds:Number(form.get('window')), scope:form.get('scope')};
     else if (selectedType === 'bot_score') config = {threshold:Number(form.get('threshold'))};
     else if (selectedType === 'user_agent') config = {patterns:lines('patterns')};
-    else if (selectedType === 'proprietary_login') config = {login_url:String(form.get('login_url')), success_url:String(form.get('success_url'))};
+    else if (selectedType === 'proprietary_login') config = {login_url:String(form.get('login_url')), success_url:String(form.get('success_url')), force_desktop:event.target.force_desktop.checked};
     else if (selectedType.includes('ip_')) config = {networks:lines('networks')};
     else { config = {countries:lines('countries'), states:lines('states'), cities:lines('cities'), on_unknown:form.get('on_unknown')}; if (form.get('latitude')) config.radius = {latitude:Number(form.get('latitude')), longitude:Number(form.get('longitude')), kilometers:Number(form.get('kilometers'))}; }
     try { await api(`/api/projects/${project.id}/policies`, {method:'POST', body:JSON.stringify({type:selectedType, name:form.get('name'), config})}); closeModal(); toast('Política ativada.'); await load(); openProject(project.id); } catch(error) { toast(error.message, 'error'); }

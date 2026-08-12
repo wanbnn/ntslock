@@ -66,6 +66,10 @@ HOP_BY_HOP = {
     "trailers", "transfer-encoding", "upgrade", "host", "content-length",
 }
 PUBLIC_GATEWAY_PATHS = ("/static", "/api/gate", "/gate", "/auth")
+DESKTOP_LOGIN_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+)
 
 
 @asynccontextmanager
@@ -298,6 +302,8 @@ def _validate_policy(payload: PolicyCreate) -> None:
             raise HTTPException(422, "login_url e success_url devem ser URLs HTTP(S)")
         if login.username or login.password or success.username or success.password:
             raise HTTPException(422, "URLs de autenticação não podem conter credenciais")
+        if not isinstance(config.get("force_desktop", False), bool):
+            raise HTTPException(422, "force_desktop deve ser verdadeiro ou falso")
 
 
 @app.get("/health", include_in_schema=False)
@@ -471,7 +477,8 @@ def _matches_auth_success(target: str, success_url: str) -> bool:
 
 
 def _rewrite_login_html(
-    content: str, base_url: str, session_id: str, session: dict
+    content: str, base_url: str, session_id: str, session: dict,
+    force_desktop: bool = False,
 ) -> str:
     def replace_attribute(match: re.Match) -> str:
         name, quote_char, value = match.group(1), match.group(2), match.group(3)
@@ -500,7 +507,21 @@ def _rewrite_login_html(
         session["allowed_origins"].add(target_origin)
         return f"url('{_auth_proxy_url(session_id, target)}')"
 
-    return re.sub(r"url\(([^)]+)\)", replace_css, content, flags=re.IGNORECASE)
+    content = re.sub(r"url\(([^)]+)\)", replace_css, content, flags=re.IGNORECASE)
+    if force_desktop:
+        content = re.sub(
+            r"<meta\b(?=[^>]*\bname\s*=\s*([\"'])viewport\1)[^>]*>",
+            "", content, flags=re.IGNORECASE,
+        )
+        desktop_viewport = '<meta name="viewport" content="width=1280">'
+        if re.search(r"<head\b[^>]*>", content, flags=re.IGNORECASE):
+            content = re.sub(
+                r"(<head\b[^>]*>)", rf"\1{desktop_viewport}", content,
+                count=1, flags=re.IGNORECASE,
+            )
+        else:
+            content = desktop_viewport + content
+    return content
 
 
 def _auth_session(request: Request, session_id: str) -> dict:
@@ -557,6 +578,13 @@ async def proprietary_login_proxy(session_id: str, request: Request):
         if key.lower() not in HOP_BY_HOP
         and key.lower() not in {"cookie", "authorization", "origin", "referer"}
     }
+    if session["force_desktop"]:
+        headers["user-agent"] = DESKTOP_LOGIN_USER_AGENT
+        for client_hint in (
+            "sec-ch-ua", "sec-ch-ua-mobile", "sec-ch-ua-platform",
+            "viewport-width", "sec-ch-viewport-width",
+        ):
+            headers.pop(client_hint, None)
     parsed = urlparse(target)
     origin = f"{parsed.scheme}://{parsed.netloc}"
     if request.method not in {"GET", "HEAD"}:
@@ -595,7 +623,7 @@ async def proprietary_login_proxy(session_id: str, request: Request):
     body = upstream.content
     if "text/html" in media_type:
         body = _rewrite_login_html(
-            upstream.text, target, session_id, session
+            upstream.text, target, session_id, session, session["force_desktop"]
         ).encode("utf-8")
         response_headers["content-type"] = "text/html; charset=utf-8"
         response_headers.pop("content-length", None)
@@ -1146,6 +1174,7 @@ async def proxy_request(request: Request, project: dict, path: str):
             "policy_id": login_policy["id"],
             "login_url": login_policy["config"]["login_url"],
             "success_url": login_policy["config"]["success_url"],
+            "force_desktop": bool(login_policy["config"].get("force_desktop", False)),
             "return_path": return_path,
             "browser_hash": browser_hash(browser_secret, config.secret_key),
             "last_url": "", "http": request.app.state.proprietary_http_factory(),
