@@ -1,8 +1,8 @@
 {
   "lockVersion": 1,
-  "generatedAt": "2026-08-12T16:29:17.854548+00:00",
+  "generatedAt": "2026-08-12T20:21:00.252404+00:00",
   "python": "3.13.15",
-  "contentHash": "sha256:959975c7cdaef7b51599a532ec614e523d041a286a22ac42c28b090aca73a432",
+  "contentHash": "sha256:b31c56ee206b99801de68be572d365793f79326f2519b858584992e5b2102060",
   "packages": [
     {
       "name": "6cons",
@@ -104,6 +104,17 @@
       ]
     },
     {
+      "name": "cffi",
+      "version": "2.1.1",
+      "direct": false,
+      "dev": false,
+      "requirement": "cffi==2.1.1",
+      "url": "https://files.pythonhosted.org/packages/95/95/86342356ff5953b3fb06f7ef7c5bee212d45e770abc7218d451b9148313c/cffi-2.1.1-cp313-cp313-manylinux2014_x86_64.manylinux_2_17_x86_64.whl",
+      "hashes": [
+        "a931079504ecc49efed7744c476a5c343a92fabf66dec2db95edb1b2fdc770e2"
+      ]
+    },
+    {
       "name": "charset-normalizer",
       "version": "3.5.0",
       "direct": false,
@@ -123,6 +134,17 @@
       "url": "https://files.pythonhosted.org/packages/fb/e2/79c688af8b210d232694e31e59da9f6ec747bae31c3f5946e4e9b98860d5/click-8.4.2-py3-none-any.whl",
       "hashes": [
         "e6f9f66136c816745b9d65817da91d61d957fb16e02e4dcd0552553c5a197b76"
+      ]
+    },
+    {
+      "name": "cryptography",
+      "version": "50.0.0",
+      "direct": false,
+      "dev": false,
+      "requirement": "cryptography==50.0.0",
+      "url": "https://files.pythonhosted.org/packages/da/3a/f05e32c99d440c9bb891ea0e36c9091891e36be5a9a87ab2ee6ea20729f6/cryptography-50.0.0-cp311-abi3-manylinux_2_34_x86_64.whl",
+      "hashes": [
+        "82148ec5bddac30b51a5b3c1945075f896fa022cb93f8e4a01e9f6ee95292c5f"
       ]
     },
     {
@@ -313,6 +335,17 @@
       ]
     },
     {
+      "name": "pycparser",
+      "version": "3.0",
+      "direct": false,
+      "dev": false,
+      "requirement": "pycparser==3.0",
+      "url": "https://files.pythonhosted.org/packages/0c/c3/44f3fbbfa403ea2a7c779186dc20772604442dde72947e7d01069cbe98e3/pycparser-3.0-py3-none-any.whl",
+      "hashes": [
+        "b727414169a36b7d524c1c3e31839a521725078d7b2ff038656844266160a992"
+      ]
+    },
+    {
       "name": "pydantic",
       "version": "2.13.4",
       "direct": false,
@@ -354,6 +387,17 @@
       "url": "https://files.pythonhosted.org/packages/f4/7e/a72dd26f3b0f4f2bf1dd8923c85f7ceb43172af56d63c7383eb62b332364/pygments-2.20.0-py3-none-any.whl",
       "hashes": [
         "81a9e26dd42fd28a23a2d169d86d7ac03b46e2f8b59ed4698fb4785f946d0176"
+      ]
+    },
+    {
+      "name": "PyJWT",
+      "version": "2.13.0",
+      "direct": true,
+      "dev": false,
+      "requirement": "PyJWT==2.13.0",
+      "url": "https://files.pythonhosted.org/packages/a3/5e/ecf12fdb62546d64385c158514e9b2b671f7832108ef2ecd2020ce0af2d1/pyjwt-2.13.0-py3-none-any.whl",
+      "hashes": [
+        "66adcc2aff09b3f1bbd95fc1e1577df8ac8723c978552fd43304c8a290ac5728"
       ]
     },
     {

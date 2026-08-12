@@ -14,6 +14,7 @@ from pathlib import Path
 from urllib.parse import quote, unquote, urlencode, urljoin, urlparse
 
 import httpx
+import jwt
 import qrcode
 import qrcode.image.svg
 import uvicorn
@@ -39,8 +40,15 @@ from .captcha import create_visual_challenge, render_visual_challenge
 from .config import Settings, get_settings
 from .container_firewall import ContainerFirewall
 from .docker_discovery import discover_containers
+from .identity import IdentityKeyring, stable_subject
 from .policies import Decision, PolicyEngine
-from .schemas import LocationCapture, PolicyCreate, ProjectCreate, ProjectUpdate
+from .schemas import (
+    IdentityIntrospection,
+    LocationCapture,
+    PolicyCreate,
+    ProjectCreate,
+    ProjectUpdate,
+)
 from .security import (
     browser_hash,
     client_ip,
@@ -68,7 +76,9 @@ HOP_BY_HOP = {
     "connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te",
     "trailers", "transfer-encoding", "upgrade", "host", "content-length",
 }
-PUBLIC_GATEWAY_PATHS = ("/static", "/api/gate", "/gate", "/auth")
+PUBLIC_GATEWAY_PATHS = (
+    "/static", "/api/gate", "/gate", "/auth", "/.well-known", "/api/identity",
+)
 DESKTOP_LOGIN_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
@@ -80,6 +90,7 @@ async def lifespan(app: FastAPI):
     settings = get_settings()
     app.state.settings = settings
     app.state.store = Store(settings.database_path)
+    app.state.identity_keyring = IdentityKeyring(settings.data_dir)
     app.state.engine = PolicyEngine(settings.geoip_city_db)
     app.state.proprietary_login_sessions = {}
     app.state.proprietary_http_factory = lambda: httpx.AsyncClient(
@@ -120,6 +131,16 @@ app.mount("/static", StaticFiles(directory=Path(__file__).parent / "static"), na
 
 def _is_public_gateway_path(path: str) -> bool:
     return any(path == prefix or path.startswith(f"{prefix}/") for prefix in PUBLIC_GATEWAY_PATHS)
+
+
+def _upstream_cookies(cookie_header: str, identity_cookie_name: str = "") -> str:
+    forwarded = []
+    for part in cookie_header.split(";"):
+        item = part.strip()
+        name = item.split("=", 1)[0] if "=" in item else ""
+        if item and (not name.startswith("inlock_") or name == identity_cookie_name):
+            forwarded.append(item)
+    return "; ".join(forwarded)
 
 
 @app.middleware("http")
@@ -309,6 +330,19 @@ def _validate_policy(payload: PolicyCreate) -> None:
             raise HTTPException(422, "force_desktop deve ser verdadeiro ou falso")
         if not isinstance(config.get("login_mask", False), bool):
             raise HTTPException(422, "login_mask deve ser verdadeiro ou falso")
+        if not isinstance(config.get("issue_identity_token", True), bool):
+            raise HTTPException(422, "issue_identity_token deve ser verdadeiro ou falso")
+        cookie_name = str(config.get("identity_cookie_name", "")).strip()
+        if cookie_name and not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", cookie_name):
+            raise HTTPException(422, "identity_cookie_name inválido")
+        try:
+            identity_ttl = int(config.get("identity_ttl_seconds", 8 * 60 * 60))
+        except (TypeError, ValueError):
+            raise HTTPException(422, "identity_ttl_seconds inválido") from None
+        if not 300 <= identity_ttl <= 7 * 24 * 60 * 60:
+            raise HTTPException(422, "identity_ttl_seconds deve ficar entre 300 e 604800")
+        if config.get("identity_samesite", "lax") not in {"lax", "strict"}:
+            raise HTTPException(422, "identity_samesite deve ser lax ou strict")
         if config.get("login_mask"):
             selector_types = {
                 "username_selector_type": {"id", "name", "xpath"},
@@ -686,6 +720,40 @@ async def _complete_proprietary_login(
         max_age=config.access_ttl_seconds, httponly=True,
         secure=config.secure_cookies, samesite="lax", path="/",
     )
+    policy_config = session["policy_config"]
+    identity_name = session.get("authenticated_name", "").strip()
+    if (
+        session.get("login_mask") and identity_name
+        and policy_config.get("issue_identity_token", True)
+    ):
+        ttl = min(
+            max(int(policy_config.get("identity_ttl_seconds", config.identity_default_ttl_seconds)), 300),
+            config.identity_max_ttl_seconds,
+        )
+        now = int(time.time())
+        jti = random_token(18)
+        subject = stable_subject(config.secret_key, project["id"], identity_name)
+        audience = f"inlock:project:{project['id']}"
+        issuer = config.public_url.rstrip("/")
+        claims = {
+            "iss": issuer, "aud": audience, "sub": subject, "name": identity_name,
+            "project_id": project["id"], "project": project["slug"], "jti": jti,
+            "iat": now, "nbf": now, "exp": now + ttl,
+        }
+        token = request.app.state.identity_keyring.sign(claims)
+        store(request).save_identity_session({
+            "jti": jti, "project_id": project["id"], "subject": subject,
+            "name": identity_name, "expires_at": now + ttl,
+        })
+        cookie_name = (
+            str(policy_config.get("identity_cookie_name", "")).strip()
+            or f"inlock_identity_{project['slug'].replace('-', '_')}"
+        )
+        response.set_cookie(
+            cookie_name, token, max_age=ttl, httponly=True,
+            secure=config.secure_cookies,
+            samesite=policy_config.get("identity_samesite", "lax"), path="/",
+        )
     store(request).audit(
         project["id"], "proprietary_login", "success",
         client_ip(request, config.trusted_proxies),
@@ -770,6 +838,7 @@ async def submit_proprietary_login_mask(
         raise HTTPException(502, "Serviço de autenticação indisponível") from None
     location = upstream.headers.get("location")
     if location:
+        session["authenticated_name"] = inlock_username
         target = urljoin(form["action"], location)
         target_origin = _origin(target)
         if not target_origin:
@@ -796,6 +865,67 @@ async def submit_proprietary_login_mask(
         ),
         status_code=401, headers={"Cache-Control": "no-store"},
     )
+
+
+@app.get("/.well-known/jwks.json", include_in_schema=False)
+async def identity_jwks(request: Request):
+    return JSONResponse(
+        request.app.state.identity_keyring.jwks(),
+        headers={"Cache-Control": "public, max-age=300"},
+    )
+
+
+@app.post("/api/identity/introspect")
+async def introspect_identity(payload: IdentityIntrospection, request: Request):
+    try:
+        unverified = jwt.decode(
+            payload.token, options={"verify_signature": False, "verify_exp": False}
+        )
+        project_id = int(unverified.get("project_id"))
+        claims = request.app.state.identity_keyring.decode(
+            payload.token, settings(request).public_url.rstrip("/"),
+            f"inlock:project:{project_id}",
+        )
+    except (jwt.PyJWTError, TypeError, ValueError):
+        return {"active": False}
+    identity_session = store(request).identity_session(str(claims.get("jti", "")))
+    active = bool(
+        identity_session and identity_session["revoked_at"] is None
+        and identity_session["expires_at"] >= int(time.time())
+        and identity_session["project_id"] == project_id
+    )
+    return {"active": active, **(claims if active else {})}
+
+
+@app.post("/api/identity/keys/rotate", dependencies=[Depends(admin)])
+async def rotate_identity_key(request: Request):
+    kid = request.app.state.identity_keyring.rotate(
+        settings(request).identity_max_ttl_seconds
+    )
+    store(request).audit(None, "identity.key", "rotated", kid=kid)
+    return {"kid": kid}
+
+
+@app.post(
+    "/api/identity/keys/{kid}/revoke",
+    status_code=204, dependencies=[Depends(admin)],
+)
+async def revoke_identity_key(kid: str, request: Request):
+    if not request.app.state.identity_keyring.revoke(kid):
+        raise HTTPException(409, "Chave inexistente, já revogada ou atualmente ativa")
+    store(request).audit(None, "identity.key", "revoked", kid=kid)
+    return Response(status_code=204)
+
+
+@app.post(
+    "/api/identity/sessions/{jti}/revoke",
+    status_code=204, dependencies=[Depends(admin)],
+)
+async def revoke_identity_session(jti: str, request: Request):
+    if not store(request).revoke_identity_session(jti, int(time.time())):
+        raise HTTPException(404, "Sessão de identidade não encontrada ou já revogada")
+    store(request).audit(None, "identity.session", "revoked", jti=jti)
+    return Response(status_code=204)
 
 
 @app.api_route(
@@ -1439,9 +1569,17 @@ async def proxy_request(request: Request, project: dict, path: str):
     query = f"?{request.url.query}" if request.url.query else ""
     url = f"{project['upstream_url']}/{path}{query}"
     headers = {key: value for key, value in request.headers.items() if key.lower() not in HOP_BY_HOP and key.lower() != "cookie"}
-    cookies = [part.strip() for part in request.headers.get("cookie", "").split(";") if part.strip() and not part.strip().startswith("inlock_")]
-    if cookies:
-        headers["cookie"] = "; ".join(cookies)
+    identity_cookie_name = ""
+    if login_policy and login_policy["config"].get("issue_identity_token", True):
+        identity_cookie_name = (
+            str(login_policy["config"].get("identity_cookie_name", "")).strip()
+            or f"inlock_identity_{project['slug'].replace('-', '_')}"
+        )
+    forwarded_cookies = _upstream_cookies(
+        request.headers.get("cookie", ""), identity_cookie_name
+    )
+    if forwarded_cookies:
+        headers["cookie"] = forwarded_cookies
     headers["x-forwarded-for"] = ip
     headers["x-forwarded-proto"] = request.url.scheme
     headers["x-forwarded-host"] = request.headers.get("host", "")

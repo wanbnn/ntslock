@@ -303,6 +303,30 @@ responsiva. Essa máscara permanece responsiva mesmo quando **Forçar modo
 computador** estiver ativo; o modo desktop continua aplicado apenas à comunicação
 com a aplicação proprietária.
 
+Quando **Disponibilizar token de autenticação** estiver ativo, um login concluído
+pela máscara também cria um JWT EdDSA (`Ed25519`) em cookie `HttpOnly`, host-only.
+O cookie é entregue ao upstream protegido, mas não fica acessível a JavaScript.
+Seu nome, validade (8 horas por padrão) e `SameSite` são configuráveis na política.
+O token contém `sub` estável por projeto/login, `name`, `project`, `project_id`,
+`iss`, `aud`, `iat`, `nbf`, `exp`, `jti` e o `kid` da chave usada.
+
+A aplicação protegida deve validar assinatura, algoritmo, expiração, emissor e
+audience (`inlock:project:<id>`). As chaves públicas ficam em
+`/.well-known/jwks.json`; as chaves privadas Ed25519 são persistidas com permissão
+restrita em `data/signing-keys` e nunca são expostas. Para consultar revogação
+imediata, envie o JWT em `POST /api/identity/introspect` no formato
+`{"token":"..."}`. Rotação de chave e revogação administrativa estão disponíveis
+em `POST /api/identity/keys/rotate`,
+`POST /api/identity/keys/<kid>/revoke` e
+`POST /api/identity/sessions/<jti>/revoke`, protegidos pelo token administrativo.
+Uma rotação mantém a chave pública anterior durante a validade máxima configurada;
+revogá-la explicitamente invalida imediatamente todos os tokens daquela chave.
+
+```env
+INLOCK_IDENTITY_DEFAULT_TTL_SECONDS=28800
+INLOCK_IDENTITY_MAX_TTL_SECONDS=604800
+```
+
 Os cookies da aplicação de login permanecem somente na memória do Inlock e são
 associados a uma sessão efêmera do navegador; não são enviados ao cliente nem
 gravados no banco. Corpos de formulários são retransmitidos em memória e não

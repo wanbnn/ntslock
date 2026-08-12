@@ -76,3 +76,7 @@ class LocationCapture(BaseModel):
     latitude: float = Field(ge=-90, le=90)
     longitude: float = Field(ge=-180, le=180)
     accuracy: float = Field(ge=0, le=100_000)
+
+
+class IdentityIntrospection(BaseModel):
+    token: str = Field(min_length=20, max_length=16_384)

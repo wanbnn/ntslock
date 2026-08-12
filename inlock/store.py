@@ -89,6 +89,18 @@ CREATE TABLE IF NOT EXISTS client_locations (
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_location_expiry ON client_locations(expires_at);
+CREATE TABLE IF NOT EXISTS identity_sessions (
+    jti TEXT PRIMARY KEY,
+    project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    subject TEXT NOT NULL,
+    name TEXT NOT NULL,
+    expires_at INTEGER NOT NULL,
+    revoked_at INTEGER,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_identity_project_subject
+ON identity_sessions(project_id, subject);
+CREATE INDEX IF NOT EXISTS idx_identity_expiry ON identity_sessions(expires_at);
 """
 
 
@@ -397,6 +409,31 @@ class Store:
                 (token_hash, project_id, now),
             ).fetchone()
             return dict(row) if row else None
+
+    def save_identity_session(self, values: dict[str, Any]) -> None:
+        with self._lock, self.connect() as db:
+            db.execute("DELETE FROM identity_sessions WHERE expires_at<?", (int(datetime.now(UTC).timestamp()),))
+            db.execute(
+                """INSERT INTO identity_sessions
+                (jti,project_id,subject,name,expires_at,revoked_at,created_at)
+                VALUES(?,?,?,?,?,NULL,?)""",
+                (values["jti"], values["project_id"], values["subject"],
+                 values["name"], values["expires_at"], utcnow()),
+            )
+
+    def identity_session(self, jti: str) -> dict[str, Any] | None:
+        with self.connect() as db:
+            row = db.execute(
+                "SELECT * FROM identity_sessions WHERE jti=?", (jti,)
+            ).fetchone()
+            return dict(row) if row else None
+
+    def revoke_identity_session(self, jti: str, now: int) -> bool:
+        with self._lock, self.connect() as db:
+            return db.execute(
+                """UPDATE identity_sessions SET revoked_at=?
+                WHERE jti=? AND revoked_at IS NULL""", (now, jti)
+            ).rowcount > 0
 
     def events(self, limit: int = 50) -> list[dict[str, Any]]:
         with self.connect() as db:

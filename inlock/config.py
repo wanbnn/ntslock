@@ -27,6 +27,8 @@ class Settings(BaseSettings):
     human_session_ttl_seconds: int = 30 * 60
     location_ttl_seconds: int = 8 * 60 * 60
     proprietary_login_ttl_seconds: int = 15 * 60
+    identity_default_ttl_seconds: int = 8 * 60 * 60
+    identity_max_ttl_seconds: int = 7 * 24 * 60 * 60
     tls_fingerprint_header: str = ""
     trusted_proxies: Annotated[list[str], NoDecode] = ["127.0.0.1/32", "::1/128"]
     geoip_city_db: Path | None = None

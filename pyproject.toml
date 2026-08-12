@@ -20,6 +20,7 @@ dependencies = [
   "geoip2>=5,<6",
   "python-multipart>=0.0.20,<1",
   "lxml>=6,<7",
+  "PyJWT[crypto]>=2.10,<3",
   "pyreact-framework>=1.0.5",
   "uikitpr>=0.3.2",
   "6cons>=0.1.0",

@@ -4,6 +4,7 @@ from pathlib import Path
 from urllib.parse import parse_qsl
 
 import httpx
+import jwt
 import pytest
 from fastapi.testclient import TestClient
 
@@ -274,6 +275,9 @@ def test_responsive_inlock_login_mask_submits_selected_original_form(client):
                 "password_selector_type": "xpath",
                 "password_selector": "//input[@data-secret='main']",
                 "submit_selector_type": "type", "submit_selector": "submit",
+                "issue_identity_token": True,
+                "identity_cookie_name": "company_identity",
+                "identity_ttl_seconds": 3600,
             },
         },
     )
@@ -327,6 +331,34 @@ def test_responsive_inlock_login_mask_submits_selected_original_form(client):
         assert completed.status_code == 303
         assert completed.headers["location"] == "/p/demo/private"
         assert f"inlock_proprietary_{project['id']}" in browser.cookies
+        token = browser.cookies.get("company_identity")
+        assert token
+        assert "HttpOnly" in completed.headers["set-cookie"]
+        assert "Domain=" not in completed.headers["set-cookie"]
+        jwks = browser.get("/.well-known/jwks.json").json()
+        header = jwt.get_unverified_header(token)
+        public_key = jwt.PyJWK.from_dict(next(
+            key for key in jwks["keys"] if key["kid"] == header["kid"]
+        )).key
+        claims = jwt.decode(
+            token, public_key, algorithms=["EdDSA"],
+            audience=f"inlock:project:{project['id']}",
+            issuer="http://localhost:14900",
+        )
+        assert claims["name"] == "maria"
+        assert claims["project"] == "demo"
+        active = browser.post(
+            "/api/identity/introspect", json={"token": token}
+        ).json()
+        assert active["active"] is True
+        assert active["sub"] == claims["sub"]
+        revoked = browser.post(
+            f"/api/identity/sessions/{claims['jti']}/revoke", headers=headers
+        )
+        assert revoked.status_code == 204
+        assert browser.post(
+            "/api/identity/introspect", json={"token": token}
+        ).json() == {"active": False}
     finally:
         app.state.proprietary_http_factory = old_factory
 
